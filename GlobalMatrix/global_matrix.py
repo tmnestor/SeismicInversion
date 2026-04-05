@@ -70,6 +70,7 @@ def _build_system(
     thickness: np.ndarray,
     p: complex,
     omega: np.ndarray,
+    source_terms: dict[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Assemble the global matrix system G x = b for all frequencies.
 
@@ -236,6 +237,24 @@ def _build_system(
                 G[:, row, c_next + 1] -= E_d[k_next][eq_row, 1]
 
             row += 1
+
+    # Inject source contributions into RHS
+    if source_terms is not None:
+        # Ocean-bottom interface (key 0): 3 equations at rows 0-2
+        # σ components map as: row0 ← σ[1] (u_z), row1 ← σ[2] (σ_zz), row2 ← σ[3] (σ_xz)
+        if 0 in source_terms:
+            sigma = source_terms[0]
+            b[:, 0] += sigma[:, 1]
+            b[:, 1] += sigma[:, 2]
+            b[:, 2] += sigma[:, 3]
+
+        # Solid-solid interfaces (key k): 4 equations starting at row 3 + 4*(k-1)
+        for k in range(1, nlayer - 1):
+            if k in source_terms:
+                sigma = source_terms[k]
+                row_start = 3 + 4 * (k - 1)
+                for eq_row in range(4):
+                    b[:, row_start + eq_row] += sigma[:, eq_row]
 
     return G, b, N
 

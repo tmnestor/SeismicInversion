@@ -20,10 +20,12 @@ from .layer_matrix import (
     ocean_eigenvectors,
     ocean_eigenvectors_torch,
 )
+from .riccati_solver import compute_source_vector
 
 __version__ = "1.0.0"
 
 __all__ = [
+    "compute_source_vector",
     "gmm_reflectivity",
     "gmm_reflectivity_torch",
     "gmm_jacobian",

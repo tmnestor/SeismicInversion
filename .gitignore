@@ -14,6 +14,7 @@ build/
 figures/
 *.npz
 *.png
+*.pt
 
 # PDFs (papers, large binaries)
 *.pdf
