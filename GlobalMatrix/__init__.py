@@ -16,10 +16,14 @@ seismograms", Geophys. J. R. astr. Soc.
 from .global_matrix import gmm_reflectivity
 from .layer_matrix import (
     layer_eigenvectors,
+    layer_eigenvectors_batched,
+    layer_eigenvectors_sh_batched,
     layer_eigenvectors_torch,
     ocean_eigenvectors,
+    ocean_eigenvectors_batched,
     ocean_eigenvectors_torch,
 )
+from .layered_greens import layered_greens_6x6, layered_greens_psv
 from .riccati_solver import compute_source_vector
 
 __version__ = "1.0.0"
@@ -31,8 +35,13 @@ __all__ = [
     "gmm_jacobian",
     "gmm_hessian",
     "layer_eigenvectors",
+    "layer_eigenvectors_batched",
+    "layer_eigenvectors_sh_batched",
     "layer_eigenvectors_torch",
+    "layered_greens_6x6",
+    "layered_greens_psv",
     "ocean_eigenvectors",
+    "ocean_eigenvectors_batched",
     "ocean_eigenvectors_torch",
     "compute_and_compare",
     "GMMConfig",
