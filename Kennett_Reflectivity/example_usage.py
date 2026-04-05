@@ -22,6 +22,9 @@ spec = importlib.util.spec_from_file_location(
     "Kennett_Reflectivity",
     str(Path(__file__).parent / "__init__.py"),
 )
+if spec is None or spec.loader is None:
+    msg = "Failed to locate Kennett_Reflectivity package"
+    raise ImportError(msg)
 pkg = importlib.util.module_from_spec(spec)
 sys.modules["Kennett_Reflectivity"] = pkg
 spec.loader.exec_module(pkg)

@@ -37,6 +37,9 @@ __all__ = [
     "OutputConfig",
     "load_config",
     "save_config",
+    "invert_taup",
+    "InversionResult",
+    "compute_taup_traces",
 ]
 
 
@@ -61,6 +64,16 @@ def __getattr__(name: str):
             "OutputConfig": OutputConfig,
             "load_config": load_config,
             "save_config": save_config,
+        }[name]
+
+    _inversion_names = ("invert_taup", "InversionResult", "compute_taup_traces")
+    if name in _inversion_names:
+        from .taup_inversion import InversionResult, compute_taup_traces, invert_taup
+
+        return {
+            "invert_taup": invert_taup,
+            "InversionResult": InversionResult,
+            "compute_taup_traces": compute_taup_traces,
         }[name]
 
     _cli_names = ("compute_and_compare",)

@@ -14,7 +14,7 @@ Main components:
 
 from __future__ import annotations
 
-from .kennett_reflectivity import inv2x2, kennett_reflectivity
+from .kennett_reflectivity import batch_inv2x2, inv2x2, kennett_reflectivity
 from .layer_model import LayerModel, complex_slowness, vertical_slowness
 from .scattering_matrices import (
     ScatteringCoefficients,
@@ -35,6 +35,7 @@ __all__ = [
     "ocean_bottom_interface",
     "kennett_reflectivity",
     "inv2x2",
+    "batch_inv2x2",
     "ricker_spectrum",
     "ricker_wavelet",
     "compute_seismogram",
