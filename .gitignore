@@ -17,6 +17,7 @@ figures/
 
 # PDFs (papers, large binaries)
 *.pdf
+!latex/*.pdf
 
 # LaTeX aux
 *.aux
