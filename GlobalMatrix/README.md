@@ -13,12 +13,19 @@ amplitudes directly.
 1. **Forward model** -- assembles the displacement-stress eigenvector matrices,
    builds the global system, and extracts PP reflectivity via `np.linalg.solve`
    (NumPy) or `torch.linalg.solve` (PyTorch).
-2. **Differentiable model** -- the PyTorch version is fully differentiable via
+2. **Block-Riccati solver** -- O(N) per-frequency sweep that eliminates the
+   dense system assembly, exploiting the block-tridiagonal structure. Available
+   in both NumPy and PyTorch.
+3. **Differentiable model** -- the PyTorch version is fully differentiable via
    `torch.autograd`. Implicit differentiation through `torch.linalg.solve`
    makes backward passes cheaper than walking the full Kennett recursive graph.
-3. **Jacobian and Hessian** -- computed via `torch.func.jacrev` (vectorized
+4. **Jacobian and Hessian** -- computed via `torch.func.jacrev` (vectorized
    reverse-mode AD) and `torch.func.hessian`, yielding 10--14x speedup over
    the loop-based `torch.autograd.functional.jacobian`.
+5. **Tau-p inversion** -- Newton-Levenberg-Marquardt inversion in the tau-p
+   domain using the GMM Riccati-sweep forward model with exact Hessians.
+   Recovers layered earth models from frequency-domain plane-wave reflectivity
+   data R(omega, p).
 
 ### Why GMM alongside Kennett?
 
@@ -60,15 +67,39 @@ GlobalMatrix/
 ├── layer_matrix.py           # Displacement-stress E-matrices (NumPy + PyTorch)
 ├── global_matrix.py          # System assembly and solve (NumPy)
 ├── gmm_torch.py              # Differentiable version + Jacobian/Hessian (PyTorch)
-├── gmm_reflectivity_cli.py   # CLI entry point
+├── riccati_solver.py         # Block-Riccati O(N) sweep solver (NumPy + PyTorch)
+├── taup_inversion.py         # Newton-LM tau-p inversion using GMM forward model
+├── gmm_reflectivity_cli.py   # CLI entry point (reflectivity)
 ├── config.py                 # YAML config loader/validator/serializer
 ├── configs/
 │   └── default_ocean_crust.yaml  # Default 5-layer model config
 ├── test_gmm.py               # Forward validation tests (GMM vs Kennett)
-└── test_gmm_gradients.py     # Derivative validation tests
+├── test_gmm_gradients.py     # Derivative validation tests
+├── test_riccati.py           # Riccati solver validation tests
+└── test_taup_inversion.py    # Inversion convergence and trace-recovery tests
 ```
 
 ## CLI Reference
+
+### `taup_inversion`
+
+Run a Newton-LM tau-p inversion using the GMM Riccati-sweep forward model.
+
+```bash
+python -m GlobalMatrix.taup_inversion
+python -m GlobalMatrix.taup_inversion --config inversion.yaml
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | built-in model | Path to YAML inversion config file |
+| `--max-iter` | from config | Override max Newton iterations |
+| `--perturbation` | from config | Override initial model perturbation fraction |
+| `--seed` | from config | Override random seed |
+| `--output-dir` | from config | Override output directory |
+
+Output: LaTeX table + TikZ depth profiles + trace comparison PDF +
+convergence curves PDF + YAML config for reproducibility.
 
 ### `gmm_reflectivity_cli`
 
@@ -196,6 +227,51 @@ H = gmm_hessian(
 )  # shape: (n_params, n_params)
 ```
 
+### Tau-p inversion
+
+```python
+from GlobalMatrix import invert_taup, compute_taup_traces
+from Kennett_Reflectivity import default_ocean_crust_model
+
+model = default_ocean_crust_model()
+result = invert_taup(
+    true_model=model,
+    p_values=[0.1, 0.2, 0.3, 0.4],
+    nfreq=64,
+    perturbation=0.15,
+    max_iter=50,
+)
+
+print(f"Converged: {result.converged}")
+print(f"Iterations: {result.n_iterations}")
+print(f"Final param error: {result.param_error_history[-1]:.2e}")
+
+# Synthesize tau-p seismograms from the recovered model
+time, traces = compute_taup_traces(result.recovered_model, p_values=[0.1, 0.2, 0.3])
+```
+
+The inversion generates synthetic observed data using `gmm_reflectivity_torch`
+(Riccati sweep), computes exact Hessians via `torch.func.hessian` with implicit
+differentiation through `torch.linalg.solve`, and iterates a full-Newton solver
+with Levenberg-Marquardt damping in log-parameter space.
+
+Visualization helpers are re-exported from the Kennett package:
+
+```python
+from GlobalMatrix.taup_inversion import (
+    write_model_table_latex,
+    write_model_profiles_tikz,
+    plot_taup_traces,
+    plot_convergence_curves,
+)
+from pathlib import Path
+
+write_model_table_latex(result, Path("figures/gmm_model_table.tex"))
+write_model_profiles_tikz(result, Path("figures/gmm_depth_profiles.tex"))
+plot_taup_traces(result, Path("figures/gmm_traces.pdf"))
+plot_convergence_curves(result, Path("figures/gmm_convergence.pdf"))
+```
+
 ### Using YAML configs from Python
 
 ```python
@@ -280,6 +356,12 @@ conda run -n seismic pytest GlobalMatrix/test_gmm.py -v
 
 # Gradient validation (GMM Jacobian/Hessian vs Kennett AD)
 conda run -n seismic pytest GlobalMatrix/test_gmm_gradients.py -v
+
+# Riccati solver validation
+conda run -n seismic pytest GlobalMatrix/test_riccati.py -v
+
+# Tau-p inversion convergence and trace recovery
+conda run -n seismic pytest GlobalMatrix/test_taup_inversion.py -v
 
 # All GlobalMatrix tests
 conda run -n seismic pytest GlobalMatrix/ -v --ignore=GlobalMatrix/bench_ad.py \
