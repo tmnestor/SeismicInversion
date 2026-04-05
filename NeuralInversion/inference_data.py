@@ -20,6 +20,7 @@ from Kennett_Reflectivity.kennett_torch import (
     _unpack_params,
     model_to_tensors,
 )
+from Kennett_Reflectivity.layer_model import LayerModel
 
 from .inference_config import DataGenConfig
 
@@ -71,16 +72,19 @@ def _perturb_model(
 def generate_training_data(
     output_dir: Path,
     config: DataGenConfig | None = None,
+    ref_model: LayerModel | None = None,
 ) -> dict[str, Path]:
     """Generate training, validation, and test datasets.
 
-    Samples earth models from a prior centred on the default ocean-crust model,
+    Samples earth models from a prior centred on a reference model,
     computes forward reflectivity using ``gmm_reflectivity_torch``, and saves
     to ``.pt`` files.
 
     Args:
         output_dir: Directory for output ``.pt`` files.
         config: Data generation config. Uses defaults if ``None``.
+        ref_model: Reference earth model. Falls back to
+            ``default_ocean_crust_model()`` if ``None``.
 
     Returns:
         Dict mapping split names to file paths.
@@ -93,7 +97,8 @@ def generate_training_data(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    ref_model = default_ocean_crust_model()
+    if ref_model is None:
+        ref_model = default_ocean_crust_model()
     ref_t = model_to_tensors(ref_model)
     alpha_ref = ref_t["alpha"]
     beta_ref = ref_t["beta"]

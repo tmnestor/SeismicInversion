@@ -46,6 +46,7 @@ def train_inference_net(
     # Datasets
     train_ds = ReflectivityDataset(train_path)
     val_ds = ReflectivityDataset(val_path)
+    n_params = train_ds.log_params.shape[1]
 
     train_loader = DataLoader(
         train_ds,
@@ -64,7 +65,7 @@ def train_inference_net(
     model = SeismicInferenceNet(
         n_p=len(config.data.p_values),
         nfreq=config.data.nfreq,
-        n_params=15,
+        n_params=n_params,
         d_model=arch.d_model,
         n_heads=arch.n_heads,
         n_layers=arch.n_layers,
@@ -164,7 +165,7 @@ def train_inference_net(
                     "config": {
                         "n_p": len(config.data.p_values),
                         "nfreq": config.data.nfreq,
-                        "n_params": 15,
+                        "n_params": n_params,
                         "d_model": arch.d_model,
                         "n_heads": arch.n_heads,
                         "n_layers": arch.n_layers,
@@ -247,7 +248,6 @@ def evaluate_inference_net(
             total_params += y_batch.numel()
             total_count += x_batch.size(0)
 
-    n_params_per_sample = 15
     return {
         "nll": total_nll / max(total_count, 1),
         "mean_abs_error": total_abs_err / max(total_params, 1),

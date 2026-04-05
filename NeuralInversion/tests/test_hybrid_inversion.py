@@ -269,6 +269,14 @@ class TestLoadTrainedNetwork:
     def test_load_and_predict(self, trained_model, tmp_path):
         """Save, reload, and verify predictions match."""
         # Save checkpoint manually
+        ref_model = default_ocean_crust_model()
+        ref_t = model_to_tensors(ref_model)
+        n_params = len(
+            _pack_params(
+                ref_t["alpha"], ref_t["beta"], ref_t["rho"], ref_t["thickness"]
+            )
+        )
+
         ckpt_path = tmp_path / "test_ckpt.pt"
         torch.save(
             {
@@ -276,7 +284,7 @@ class TestLoadTrainedNetwork:
                 "config": {
                     "n_p": 12,
                     "nfreq": 64,
-                    "n_params": 15,
+                    "n_params": n_params,
                     "d_model": 32,
                     "n_heads": 4,
                     "n_layers": 2,
