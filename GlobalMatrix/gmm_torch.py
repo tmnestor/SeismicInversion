@@ -18,6 +18,7 @@ from Kennett_Reflectivity.kennett_torch import (
 )
 
 from .layer_matrix import layer_eigenvectors_torch, ocean_eigenvectors_torch
+from .riccati_solver import riccati_sweep_torch
 
 __all__ = [
     "gmm_reflectivity_torch",
@@ -27,6 +28,46 @@ __all__ = [
 
 _CDTYPE = torch.complex128
 _FDTYPE = torch.float64
+
+
+def _compute_eigenvectors_torch(
+    nlayer: int,
+    eta: torch.Tensor,
+    neta: torch.Tensor,
+    rho: torch.Tensor,
+    beta_c: torch.Tensor,
+    thickness: torch.Tensor,
+    p: torch.Tensor,
+    omega: torch.Tensor,
+) -> tuple[
+    dict[int, torch.Tensor],
+    dict[int, torch.Tensor],
+    dict[int, torch.Tensor],
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Precompute eigenvectors and phase factors (PyTorch)."""
+    cp = p.to(_CDTYPE)
+
+    E_d: dict[int, torch.Tensor] = {}
+    E_u: dict[int, torch.Tensor] = {}
+    for j in range(1, nlayer):
+        E_d[j], E_u[j] = layer_eigenvectors_torch(
+            cp, eta[j], neta[j], rho[j], beta_c[j]
+        )
+
+    e0 = torch.exp(1j * omega * eta[0] * thickness[0])
+
+    phase_d: dict[int, torch.Tensor] = {}
+    for j in range(1, nlayer - 1):
+        ph_p = torch.exp(1j * omega * eta[j] * thickness[j])
+        ph_s = torch.exp(1j * omega * neta[j] * thickness[j])
+        phase_d[j] = torch.stack([ph_p, ph_s], dim=-1)
+
+    e_d_oc, e_u_oc = ocean_eigenvectors_torch(cp, eta[0], rho[0])
+
+    return E_d, E_u, phase_d, e_d_oc, e_u_oc, e0
 
 
 def _build_system_torch(
@@ -195,6 +236,7 @@ def gmm_reflectivity_torch(
     p: float | torch.Tensor,
     omega: torch.Tensor,
     free_surface: bool = False,
+    solver: str = "riccati",
 ) -> torch.Tensor:
     """Compute plane-wave reflectivity using the Global Matrix Method (PyTorch).
 
@@ -211,6 +253,7 @@ def gmm_reflectivity_torch(
         p: Horizontal slowness (ray parameter), scalar.
         omega: Angular frequencies, shape (nfreq,). Must not include DC.
         free_surface: Include free-surface reverberations.
+        solver: ``"riccati"`` (default, O(N)) or ``"dense"`` (O(N^3)).
 
     Returns:
         Complex PP reflectivity, shape (nfreq,).
@@ -240,16 +283,21 @@ def gmm_reflectivity_torch(
     ocean_mask[0] = True
     neta = torch.where(ocean_mask, torch.zeros_like(neta_all), neta_all)
 
-    # Assemble and solve
-    G, b_vec, N = _build_system_torch(
-        nlayer, eta, neta, rho, beta_c, thickness, p, omega
-    )
-
-    x = torch.linalg.solve(G, b_vec)  # (nfreq, N)
-
-    # R = exp(i*omega*eta0*h0) * U0^P
-    e0 = torch.exp(1j * omega * eta[0] * thickness[0])
-    R = e0 * x[:, 0]
+    if solver == "riccati":
+        E_d, E_u, phase_d, e_d_oc, e_u_oc, e0 = _compute_eigenvectors_torch(
+            nlayer, eta, neta, rho, beta_c, thickness, p, omega
+        )
+        R, _U0_P = riccati_sweep_torch(nlayer, E_d, E_u, phase_d, e_d_oc, e_u_oc, e0)
+    elif solver == "dense":
+        G, b_vec, N = _build_system_torch(
+            nlayer, eta, neta, rho, beta_c, thickness, p, omega
+        )
+        x = torch.linalg.solve(G, b_vec)
+        e0 = torch.exp(1j * omega * eta[0] * thickness[0])
+        R = e0 * x[:, 0]
+    else:
+        msg = f"Unknown solver {solver!r}, expected 'riccati' or 'dense'"
+        raise ValueError(msg) from None
 
     if free_surface:
         R = R / (1.0 + R)

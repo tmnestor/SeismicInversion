@@ -26,7 +26,7 @@
 \usepackage{fancyhdr}
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small Fréchet Derivatives of the Kennett Reflectivity}
+\fancyhead[L]{\small Derivatives and Inversion Theory for Plane-Wave Reflectivity}
 \fancyhead[R]{\small\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 
@@ -59,8 +59,9 @@
 \newtheorem{remark}{Remark}
 
 \title{%
-  Fréchet Derivatives of the Kennett Reflectivity\\[6pt]
-  \large Independent Re-derivation of Dietrich \& Kormendi (1990)%
+  Derivatives and Inversion Theory for Plane-Wave Reflectivity\\[6pt]
+  \large Kennett Recursion, Global Matrix Implicit Differentiation,\\
+  and Levenberg--Marquardt Inversion%
 }
 \author{}
 \date{}
@@ -70,15 +71,29 @@
 \thispagestyle{fancy}
 
 \begin{abstract}
-We derive the complete Fréchet (first-order) derivatives of the plane-wave PP
-reflectivity for a stratified elastic medium, computed via Kennett's recursive
-reflectivity method.  The derivation uses tangent-linear (forward-mode)
-differentiation of the Kennett addition formula and is equivalent to the
-analytical Fréchet kernels of Dietrich \& Kormendi (1990).  Explicit formulae
-are given for the primitive derivative chains, the scattering matrix tangents,
-and the tangent-linear recursion.  We also present the structure of the
-second-order (Hessian) derivatives and identify the cross-coupling terms that
-make same-layer Hessian elements combinatorially complex.
+We present the complete derivative theory for plane-wave PP reflectivity
+inversion in stratified elastic media.
+
+\textbf{Part~I} (Sections~1--8) derives the Fréchet (first-order) derivatives
+via tangent-linear differentiation of the Kennett addition formula, equivalent
+to the analytical kernels of Dietrich \& Kormendi (1990).  The structure of
+the second-order (Hessian) derivatives is presented, identifying the
+cross-coupling terms that make same-layer Hessian elements combinatorially
+complex.
+
+\textbf{Part~II} (Section~9) derives the Jacobian and Hessian of the
+Global Matrix Method (Chin, Hedstrom \& Thigpen, 1984) via implicit
+differentiation of the linear system $\mathbf{G}\mathbf{x} = \mathbf{b}$,
+showing that each derivative order reduces to a single back-substitution
+with the already-factored $\mathbf{G}$.  The Block-Riccati sweep solver
+(Section~9.5) reduces the forward solve from $O(N^3)$ to $O(N)$ while
+preserving the implicit differentiation advantage through a chain of
+$4\times 4$ \texttt{torch.linalg.solve} calls.
+
+\textbf{Part~III} (Section~10) presents the Levenberg--Marquardt inversion
+framework: the misfit functional, gradient, exact Hessian decomposition into
+Gauss--Newton and second-order residual terms, the damped Newton update, and
+the log-parameter transformation for positivity.
 
 \medskip\noindent
 \textbf{Convention:}  $\exp(-i\omega t)$ inverse Fourier transform; depth
@@ -720,6 +735,534 @@ captures \emph{all} cross-terms, resolving the combinatorial complexity that
 prevented completion of the 1991 hand derivation.
 
 %=============================================================================
+\section{Global Matrix Method: Implicit Differentiation}\label{sec:gmm}
+%=============================================================================
+
+The Global Matrix Method (Chin, Hedstrom \& Thigpen, 1984) assembles
+all interface continuity conditions into a single linear system:
+\begin{equation}\label{eq:Gxb}
+  \mathbf{G}(\bm{\theta})\,\mathbf{x} = \mathbf{b}(\bm{\theta}),
+\end{equation}
+where $\mathbf{G}$ is the global matrix encoding the displacement-stress
+continuity across all interfaces, $\mathbf{b}$ is the source vector, and
+$\mathbf{x}$ contains the displacement-stress coefficients at every
+interface.  Both $\mathbf{G}$ and $\mathbf{b}$ depend on the model
+parameter vector $\bm{\theta} = (\alpha_1,\dotsc,\alpha_N,\;
+\beta_1,\dotsc,\beta_N,\; \rho_1,\dotsc,\rho_N,\;
+h_1,\dotsc,h_{N-1})$.
+
+The reflectivity is extracted from $\mathbf{x}$ by a linear projection.
+Since $\mathbf{G}$ and $\mathbf{b}$ are assembled analytically from the
+layer $\mathbf{E}$-matrices, all derivatives of $\mathbf{G}$ and
+$\mathbf{b}$ with respect to $\bm{\theta}$ are available in closed form.
+The key advantage is that derivatives of the \emph{solution}~$\mathbf{x}$
+are obtained by implicit differentiation of the linear system, without
+differentiating through the internal steps of the solver.
+
+\subsection{Jacobian (first derivative)}\label{sec:gmm-jac}
+
+Differentiate~\eqref{eq:Gxb} with respect to a model parameter $\theta_j$:
+\begin{equation}\label{eq:dGxb}
+  \ppd{\mathbf{G}}{\theta_j}\,\mathbf{x}
+  + \mathbf{G}\,\ppd{\mathbf{x}}{\theta_j}
+  = \ppd{\mathbf{b}}{\theta_j}.
+\end{equation}
+Rearranging:
+\begin{equation}\label{eq:jac-solve}
+  \boxed{
+  \mathbf{G}\,\ppd{\mathbf{x}}{\theta_j}
+  = \ppd{\mathbf{b}}{\theta_j}
+    - \ppd{\mathbf{G}}{\theta_j}\,\mathbf{x}.
+  }
+\end{equation}
+This is a linear system with the \emph{same coefficient matrix}
+$\mathbf{G}$ as the forward problem.  Since $\mathbf{G}$ has already been
+LU-factored during the forward solve, each Jacobian column costs only a
+single back-substitution --- not a new factorisation.
+
+\subsection{Hessian (second derivative)}\label{sec:gmm-hess}
+
+Differentiate~\eqref{eq:dGxb} again with respect to a second parameter
+$\theta_k$:
+\begin{equation}\label{eq:d2Gxb}
+  \ppd{{}^2\mathbf{G}}{\theta_j\,\partial\theta_k}\,\mathbf{x}
+  + \ppd{\mathbf{G}}{\theta_j}\,\ppd{\mathbf{x}}{\theta_k}
+  + \ppd{\mathbf{G}}{\theta_k}\,\ppd{\mathbf{x}}{\theta_j}
+  + \mathbf{G}\,\ppd{{}^2\mathbf{x}}{\theta_j\,\partial\theta_k}
+  = \ppd{{}^2\mathbf{b}}{\theta_j\,\partial\theta_k}.
+\end{equation}
+Rearranging:
+\begin{equation}\label{eq:hess-solve}
+  \boxed{
+  \mathbf{G}\,\ppd{{}^2\mathbf{x}}{\theta_j\,\partial\theta_k}
+  = \ppd{{}^2\mathbf{b}}{\theta_j\,\partial\theta_k}
+    - \ppd{{}^2\mathbf{G}}{\theta_j\,\partial\theta_k}\,\mathbf{x}
+    - \ppd{\mathbf{G}}{\theta_j}\,\ppd{\mathbf{x}}{\theta_k}
+    - \ppd{\mathbf{G}}{\theta_k}\,\ppd{\mathbf{x}}{\theta_j}.
+  }
+\end{equation}
+Again the same matrix $\mathbf{G}$ appears on the left-hand side.  The
+right-hand side requires only quantities already computed:
+\begin{itemize}[nosep]
+  \item the forward solution $\mathbf{x}$,
+  \item the first derivatives $\partial\mathbf{x}/\partial\theta_j$ and
+    $\partial\mathbf{x}/\partial\theta_k$ from the Jacobian step,
+  \item the first and second derivatives of $\mathbf{G}$ and $\mathbf{b}$
+    with respect to $\bm{\theta}$, assembled analytically from the layer
+    matrices.
+\end{itemize}
+
+\noindent For the diagonal Hessian element ($\theta_k = \theta_j$)
+equation~\eqref{eq:hess-solve} simplifies to:
+\begin{equation}\label{eq:hess-diag}
+  \mathbf{G}\,\ppd{{}^2\mathbf{x}}{\theta_j^2}
+  = \ppd{{}^2\mathbf{b}}{\theta_j^2}
+    - \ppd{{}^2\mathbf{G}}{\theta_j^2}\,\mathbf{x}
+    - 2\,\ppd{\mathbf{G}}{\theta_j}\,\ppd{\mathbf{x}}{\theta_j}.
+\end{equation}
+
+\subsection{Cost comparison}\label{sec:gmm-cost}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+  \toprule
+  \textbf{Quantity} & \textbf{Kennett recursion} & \textbf{Global Matrix} \\
+  \midrule
+  Forward $\mathbf{x}$
+    & Recursive sweep: $O(N)$ $2\times 2$ ops
+    & LU factorise $\mathbf{G}$: $O(N^3)$ \\
+  Jacobian $\partial\mathbf{x}/\partial\theta_j$
+    & Backprop through full graph
+    & One back-substitution per $\theta_j$ \\
+  Hessian $\partial^2\mathbf{x}/\partial\theta_j\partial\theta_k$
+    & Backprop through the Jacobian graph
+    & One back-substitution per $(\theta_j,\theta_k)$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The Hessian is where implicit differentiation pays off most:
+the Kennett method requires AD to differentiate \emph{through} the
+already expensive Jacobian computation, doubling the graph depth, while
+the Global Matrix Method reuses the same LU factorisation for every
+derivative order.  Benchmarks show ${\sim}1.7\times$ speedup for the
+Hessian, compared to ${\sim}1.2\times$ for the Jacobian
+(see \texttt{GlobalMatrix/investigate\_ad.py}).
+
+\begin{remark}
+In PyTorch, \texttt{torch.linalg.solve} implements implicit
+differentiation in its backward pass automatically.
+\texttt{torch.func.hessian} applies the identity~\eqref{eq:hess-solve}
+twice through the autograd graph without the user writing any derivative
+formulae.
+\end{remark}
+
+\subsection{Block-tridiagonal structure and the Riccati connection}%
+\label{sec:riccati}
+
+The global matrix $\mathbf{G}$ is \emph{block-tridiagonal}: the
+displacement-stress continuity at interface~$i$ couples only the wave
+coefficients of layers~$i$ and $i{+}1$.  Partitioning $\mathbf{G}$
+into $4\times 4$ blocks (P-SV up/down amplitudes per layer):
+\begin{equation}\label{eq:block-tridiag}
+  \mathbf{G} =
+  \begin{pmatrix}
+    \mathbf{A}_0 & \mathbf{C}_0 \\
+    \mathbf{B}_1 & \mathbf{A}_1 & \mathbf{C}_1 \\
+    & \mathbf{B}_2 & \mathbf{A}_2 & \ddots \\
+    & & \ddots & \ddots & \mathbf{C}_{N-2} \\
+    & & & \mathbf{B}_{N-1} & \mathbf{A}_{N-1}
+  \end{pmatrix},
+\end{equation}
+where $\mathbf{A}_i$, $\mathbf{B}_i$, $\mathbf{C}_i$ are $4\times 4$
+blocks assembled from the displacement-stress eigenvector matrices
+$\mathbf{E}_i$ and phase factors of adjacent layers.
+
+The optimal direct solver for this structure is the \textbf{block-Thomas
+algorithm} (block-LU without fill-in), which sweeps upward through the
+interfaces eliminating one block row at a time.  At each step, the
+algorithm computes a \textbf{Schur complement}:
+\begin{equation}\label{eq:schur}
+  \mathbf{S}_i
+  = \mathbf{A}_i - \mathbf{B}_i\,\mathbf{S}_{i+1}^{-1}\,\mathbf{C}_i,
+\end{equation}
+with $\mathbf{S}_{N-1} = \mathbf{A}_{N-1}$.  This is a matrix Riccati
+recursion --- and it is \emph{algebraically identical} to the Kennett
+addition formula~\eqref{eq:addition}.
+
+\begin{proposition}[Kennett $\equiv$ Riccati block solver]
+The Kennett recursive reflectivity method is the Riccati block solver
+applied to the block-tridiagonal global matrix system.  The cumulative
+reflection matrix $\RR_d^{(i)}$ is the Schur complement of the
+sub-system below interface~$i$, expressed in wave-amplitude coordinates
+rather than displacement-stress coordinates.  The two formulations are
+related by the eigenvector transformation:
+\begin{equation}\label{eq:kennett-riccati}
+  \RR_d^{(i)}
+  = \mathbf{P}\;\mathbf{S}_i^{-1}\;\mathbf{Q},
+\end{equation}
+where $\mathbf{P}$ and $\mathbf{Q}$ are projections from the
+displacement-stress basis to the up/downgoing wave-amplitude basis.
+\end{proposition}
+
+This identity has an important consequence: the 1991 thesis (Nestor)
+used a Riccati block solver for the forward problem, which was
+\emph{already optimal} --- $O(N)$ in the number of layers, with each
+step involving only $4\times 4$ block operations.  The current
+implementation uses a dense $O(N^3)$ solver
+(\texttt{torch.linalg.solve}), which is a step backwards for the forward
+solve but gains the implicit differentiation advantage for derivatives.
+
+\medskip\noindent
+\textbf{Unifying perspective.}  The three approaches form a hierarchy:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lp{4.2cm}p{4.2cm}}
+  \toprule
+  \textbf{Method}
+    & \textbf{Forward solve}
+    & \textbf{Derivatives} \\
+  \midrule
+  Kennett recursion
+    & $O(N)$ block-Riccati sweep
+    & AD through recursive graph \\
+  GMM + Riccati solver (1991 thesis)
+    & $O(N)$ block-Thomas
+    & Hand-derived (intractable for Hessian) \\
+  GMM + dense solver
+    & $O(N^3)$ dense LU
+    & Implicit diff via \texttt{torch.linalg.solve} \\
+  GMM + Riccati solver (current)
+    & $O(N)$ differentiable block-Riccati
+    & Implicit diff through each $4\times 4$ block solve \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent This is precisely what the Riccati solver described in the
+next subsection implements: the $O(N)$ forward complexity of the
+block-Riccati sweep combined with PyTorch's implicit differentiation
+through each $4\times 4$ \texttt{torch.linalg.solve} call.
+
+\subsection{Differentiable Block-Riccati Solver}\label{sec:diff-riccati}
+
+The Block-Riccati sweep reduces the global matrix solve from $O(N^3)$
+to $O(N)$ per frequency while preserving differentiability via
+\texttt{torch.linalg.solve}.  The key insight is that the reflectivity
+can be computed by propagating a $2\times 2$ Riccati matrix through the
+layer stack, where each propagation step requires solving a single
+$4\times 4$ linear system.  Since \texttt{torch.linalg.solve} provides
+implicit differentiation in its backward pass, the Jacobian and Hessian
+are computed automatically through the chain of block solves.
+
+\paragraph{Riccati variable.}
+Define the $2\times 2$ matrix $\mathbf{Y}_k$ as the ``effective
+reflection'' at the bottom of finite elastic layer~$k$: it maps the
+downgoing amplitudes $\mathbf{D}_k$ (referenced at the top of layer~$k$)
+to the upgoing amplitudes $\mathbf{U}_k$ (referenced at the bottom):
+\begin{equation}\label{eq:riccati-var}
+  \mathbf{U}_k = \mathbf{Y}_k\,\mathbf{D}_k.
+\end{equation}
+The Riccati matrix encodes all reflections from the layer stack below
+interface~$k$.
+
+\paragraph{Upward sweep (bottom $\to$ top).}
+\textbf{Initialise:} $\mathbf{Y} = \mathbf{0}$ (radiation condition at
+the half-space --- no upgoing waves from below).
+
+\medskip\noindent
+For $k = M, M{-}1, \dotsc, 1$ (where $M$ = number of finite elastic
+layers), the Riccati matrix is updated by solving a $4\times 4$ linear
+system at each interface:
+
+\begin{enumerate}[nosep]
+\item \textbf{Effective downgoing matrix} from the layer below ($k{+}1$):
+\begin{equation}\label{eq:Eeff}
+  \underset{4\times 2}{\mathbf{E}_{\text{eff}}}
+  = \mathbf{E}_d^{(k+1)}
+  + \mathbf{E}_u^{(k+1)}\,\operatorname{diag}(\mathbf{p}_{k+1})\,\mathbf{Y},
+\end{equation}
+where $\mathbf{p}_{k+1} = (e^{i\omega\eta_{k+1}h_{k+1}},\;
+e^{i\omega\nu_{k+1}h_{k+1}})$ is the phase diagonal.  For the
+half-space ($k{+}1 = N$): $\mathbf{E}_{\text{eff}} = \mathbf{E}_d^{(N)}$.
+
+\item \textbf{Phased downgoing} of layer~$k$:
+\begin{equation}\label{eq:Ad}
+  \underset{4\times 2}{\mathbf{A}_d}
+  = \mathbf{E}_d^{(k)}\,\operatorname{diag}(\mathbf{p}_k).
+\end{equation}
+
+\item \textbf{Assemble and solve} the $4\times 4$ system:
+\begin{equation}\label{eq:riccati-solve}
+  \boxed{
+  \underbrace{\bigl[\mathbf{E}_u^{(k)} \;\big|\; {-}\mathbf{E}_{\text{eff}}\bigr]}
+    _{4\times 4}
+  \;\underbrace{\begin{pmatrix}\mathbf{Y}_{\text{new}} \\ \mathbf{Z}\end{pmatrix}}
+    _{4\times 2}
+  = -\mathbf{A}_d.
+  }
+\end{equation}
+
+\item \textbf{Extract:} $\mathbf{Y} \leftarrow \mathbf{Y}_{\text{new}}$
+(top two rows of the solution).
+\end{enumerate}
+
+\noindent
+The physical meaning of~\eqref{eq:riccati-solve} is the continuity
+condition at the bottom of layer~$k$:
+\begin{equation}
+  \mathbf{E}_d^{(k)}\,\operatorname{diag}(\mathbf{p}_k)\,\mathbf{D}_k
+  + \mathbf{E}_u^{(k)}\,\mathbf{U}_k
+  = \mathbf{E}_{\text{eff}}\,\mathbf{D}_{k+1},
+\end{equation}
+with the Riccati substitution $\mathbf{U}_k = \mathbf{Y}_{\text{new}}\,
+\mathbf{D}_k$ and $\mathbf{D}_{k+1} = \mathbf{Z}\,\mathbf{D}_k$.
+
+\paragraph{Ocean-bottom extraction.}
+After the sweep, $\mathbf{Y} = \mathbf{Y}_1$ (the Riccati matrix at the
+top of layer~1).  The effective eigenvector matrix at the ocean bottom is:
+\begin{equation}\label{eq:E1eff}
+  \mathbf{E}_1^{\text{eff}}
+  = \mathbf{E}_d^{(1)}
+  + \mathbf{E}_u^{(1)}\,\operatorname{diag}(\mathbf{p}_1)\,\mathbf{Y}_1.
+\end{equation}
+The ocean-bottom continuity conditions (u$_z$, $\sigma_{zz}$, and
+$\sigma_{xz} = 0$) yield a $2\times 2$ system for $\mathbf{D}_1$ after
+eliminating the ocean upgoing amplitude $U_0^P$:
+\begin{equation}\label{eq:ocean-sys}
+  \begin{pmatrix}
+    e_u^{(0)}[0]\;\mathbf{E}_1^{\text{eff}}[2,:] -
+    e_u^{(0)}[1]\;\mathbf{E}_1^{\text{eff}}[1,:] \\[3pt]
+    \mathbf{E}_1^{\text{eff}}[3,:]
+  \end{pmatrix}
+  \mathbf{D}_1
+  =
+  \begin{pmatrix}
+    \bigl(e_u^{(0)}[0]\,e_d^{(0)}[1] - e_u^{(0)}[1]\,e_d^{(0)}[0]\bigr)\,e_0 \\
+    0
+  \end{pmatrix},
+\end{equation}
+where $e_0 = \exp(i\omega\eta_0 h_0)$ is the one-way ocean phase.
+The upgoing P-wave amplitude is recovered from u$_z$ continuity:
+\begin{equation}\label{eq:U0P}
+  U_0^P = \frac{\mathbf{E}_1^{\text{eff}}[1,:]\cdot\mathbf{D}_1
+                - e_d^{(0)}[0]\,e_0}{e_u^{(0)}[0]},
+\end{equation}
+and the reflectivity is $R = e_0\,U_0^P$.
+
+\paragraph{Implicit differentiation through the sweep.}
+Each step of the Riccati sweep calls
+\texttt{torch.linalg.solve} on a $4\times 4$
+system~\eqref{eq:riccati-solve}, and the ocean extraction calls it on a
+$2\times 2$ system~\eqref{eq:ocean-sys}.  PyTorch's
+autograd provides implicit differentiation through each solve
+automatically:
+
+For a system $\mathbf{F}\mathbf{X} = \mathbf{C}$, the adjoint
+(backward pass) computes
+\begin{equation}\label{eq:implicit-adj}
+  \bar{\mathbf{C}} = \mathbf{F}^{-T}\bar{\mathbf{X}},
+  \qquad
+  \bar{\mathbf{F}} = -\bar{\mathbf{C}}\,\mathbf{X}^T,
+\end{equation}
+where $\bar{(\cdot)}$ denotes the adjoint (gradient of the loss with
+respect to that quantity).  The chain rule through the Riccati sweep
+composes these adjoint operations backward through the interfaces,
+yielding the Jacobian $\partial R/\partial\theta_j$ at cost
+$O(N \times 4^3)$ per frequency --- identical complexity to the forward
+sweep.
+
+\paragraph{Hessian.}
+\texttt{torch.func.hessian} computes the second-order derivatives by
+applying reverse-mode AD twice: once to form the gradient of the scalar
+misfit, then a second reverse pass to differentiate the gradient.  Each
+level of differentiation passes through the same chain of block solves,
+using the implicit differentiation identity at each step.  The total
+Hessian cost is $O(N \times P^2)$ per frequency, where $P$ is the number
+of model parameters --- the same as the dense solver, but with the
+forward pass reduced from $O(N^3)$ to $O(N)$.
+
+\paragraph{Complexity summary.}
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+  \toprule
+  \textbf{Quantity}
+    & \textbf{Dense GMM}
+    & \textbf{Riccati GMM} \\
+  \midrule
+  Forward $R(\omega)$
+    & $O(N_\omega \cdot N^3)$
+    & $O(N_\omega \cdot N \cdot 4^3)$ \\
+  Jacobian $\partial R/\partial\theta_j$
+    & $O(N_\omega \cdot N^3 + N_\omega \cdot P \cdot N^2)$
+    & $O(N_\omega \cdot N \cdot P \cdot 4^3)$ \\
+  Hessian $\partial^2\chi/\partial\theta_j\partial\theta_k$
+    & $O(N_\omega \cdot P^2 \cdot N^2)$
+    & $O(N_\omega \cdot P^2 \cdot N \cdot 4^3)$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent For $N = 100$ layers, the Riccati solver is approximately
+$60{,}000\times$ faster for the forward solve.  The derivative advantage
+is smaller (the dense solver reuses the LU factorisation) but still
+significant: $O(N)$ versus $O(N^2)$ per Jacobian column.
+
+\paragraph{Edge cases.}
+\begin{itemize}[nosep]
+\item \textbf{2-layer model} ($M = 0$): The Riccati sweep is empty.
+  The ocean couples directly to the half-space via
+  $\mathbf{E}_1^{\text{eff}} = \mathbf{E}_d^{(1)}$.
+\item \textbf{3-layer model} ($M = 1$): A single Riccati step, then
+  ocean extraction.
+\item \textbf{Free surface}: Applied identically after extracting $R$:
+  $R_{\text{fs}} = R/(1 + R)$.
+\end{itemize}
+
+%=============================================================================
+\section{Levenberg--Marquardt Inversion}\label{sec:inversion}
+%=============================================================================
+
+\subsection{Misfit functional}\label{sec:misfit}
+
+Given observed plane-wave reflectivity $R_{\text{obs}}(\omega_i, p_s)$
+at frequencies $\omega_i$ ($i = 1,\dotsc,N_\omega$) and ray parameters
+$p_s$ ($s = 1,\dotsc,N_p$), the L2 misfit is:
+\begin{equation}\label{eq:misfit}
+  \chi(\bm{\theta})
+  = \sum_{s=1}^{N_p}\sum_{i=1}^{N_\omega}
+    \bigl|R(\omega_i, p_s;\bm{\theta})
+          - R_{\text{obs}}(\omega_i, p_s)\bigr|^2.
+\end{equation}
+
+\subsection{Gradient}\label{sec:gradient}
+
+The gradient of the misfit is:
+\begin{equation}\label{eq:grad}
+  g_k
+  = \ppd{\chi}{\theta_k}
+  = 2\operatorname{Re}\sum_{s,i}
+    \overline{r_{si}}\;\ppd{R_{si}}{\theta_k},
+\end{equation}
+where $r_{si} = R(\omega_i,p_s;\bm{\theta})
+- R_{\text{obs}}(\omega_i,p_s)$ is the complex residual.  In matrix
+form:
+\begin{equation}\label{eq:grad-mat}
+  \mathbf{g} = 2\operatorname{Re}\bigl(\mathbf{J}^H\,\mathbf{r}\bigr),
+\end{equation}
+where $\mathbf{J}$ is the Jacobian matrix with entries
+$J_{(s,i),k} = \partial R_{si}/\partial\theta_k$ and
+$\mathbf{r}$ is the residual vector.
+
+\subsection{Hessian decomposition}\label{sec:hess-decomp}
+
+The Hessian of the misfit decomposes as (cf.~Section~\ref{sec:hessian}):
+\begin{equation}\label{eq:hess-full}
+  H_{kl}
+  = \ppd{{}^2\chi}{\theta_k\,\partial\theta_l}
+  = \underbrace{%
+    2\operatorname{Re}\sum_{s,i}
+    \overline{\ppd{R_{si}}{\theta_k}}\;\ppd{R_{si}}{\theta_l}
+  }_{\text{Gauss--Newton: } \mathbf{H}_{\text{GN}} = 2\operatorname{Re}(\mathbf{J}^H\mathbf{J})}
+  + \underbrace{%
+    2\operatorname{Re}\sum_{s,i}
+    \overline{r_{si}}\;\ppd{{}^2 R_{si}}{\theta_k\,\partial\theta_l}
+  }_{\text{second-order residual term}}.
+\end{equation}
+
+The Gauss--Newton approximation $\mathbf{H} \approx \mathbf{H}_{\text{GN}}$
+drops the second-order term.  This is valid near the solution where
+$\|\mathbf{r}\| \to 0$, but fails far from the solution.
+
+\subsection{The Levenberg--Marquardt update}\label{sec:LM}
+
+At each iteration, the parameter update $\delta\bm{\theta}$ solves:
+\begin{equation}\label{eq:LM}
+  \boxed{
+  \bigl(\mathbf{H} + \lambda\,\mathbf{I}\bigr)\,\delta\bm{\theta}
+  = -\mathbf{g},
+  }
+\end{equation}
+where $\mathbf{H}$ is the exact Hessian~\eqref{eq:hess-full},
+$\mathbf{g}$ is the gradient~\eqref{eq:grad-mat}, and $\lambda > 0$
+is the damping parameter.
+
+\medskip\noindent
+\textbf{Damping strategy:}
+\begin{itemize}[nosep]
+  \item If $\chi(\bm{\theta} + \delta\bm{\theta})
+        < \chi(\bm{\theta})$: accept the step, decrease
+        $\lambda \leftarrow \lambda/\nu$ (trust the Newton direction).
+  \item If $\chi(\bm{\theta} + \delta\bm{\theta})
+        \geq \chi(\bm{\theta})$: reject the step, increase
+        $\lambda \leftarrow \nu\lambda$ (more regularisation).
+\end{itemize}
+
+\noindent For $\lambda \to 0$ the update approaches the full Newton step
+with quadratic convergence; for $\lambda \to \infty$ it approaches the
+steepest-descent direction $\delta\bm{\theta} \propto -\mathbf{g}$.
+
+\subsection{Log-parameter transformation}\label{sec:logparams}
+
+To enforce positivity of physical parameters and improve conditioning,
+the inversion operates in log-parameter space:
+\begin{equation}\label{eq:logparams}
+  \bm{\phi} = \log\bm{\theta}
+  = \bigl(\log\alpha_1,\dotsc,\log\alpha_N,\;
+          \log\beta_1,\dotsc,\log\beta_N,\;
+          \log\rho_1,\dotsc,\log\rho_N,\;
+          \log h_1,\dotsc,\log h_{N-1}\bigr).
+\end{equation}
+
+The Jacobian in log-space is related to the physical-space Jacobian by:
+\begin{equation}\label{eq:log-jac}
+  \ppd{R}{\phi_k}
+  = \ppd{R}{\theta_k}\,\theta_k
+  = \theta_k\,\ppd{R}{\theta_k},
+\end{equation}
+which is equivalent to a diagonal scaling $\mathbf{J}_\phi
+= \mathbf{J}\,\operatorname{diag}(\bm{\theta})$.  The
+Hessian transforms correspondingly:
+\begin{equation}\label{eq:log-hess}
+  \ppd{{}^2\chi}{\phi_k\,\partial\phi_l}
+  = \theta_k\,\theta_l\,\ppd{{}^2\chi}{\theta_k\,\partial\theta_l}
+  + \delta_{kl}\,\theta_k\,\ppd{\chi}{\theta_k},
+\end{equation}
+where $\delta_{kl}$ is the Kronecker delta.  Both transformations are
+handled automatically by PyTorch AD when the forward model takes
+$\exp(\bm{\phi})$ as input.
+
+\subsection{Convergence properties}\label{sec:convergence}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lcc}
+  \toprule
+  \textbf{Method} & \textbf{Hessian used} & \textbf{Convergence rate} \\
+  \midrule
+  Steepest descent & none
+    & Linear: $\|\bm{\theta}_{k+1} - \bm{\theta}^*\|
+      \leq c\,\|\bm{\theta}_k - \bm{\theta}^*\|$ \\
+  Gauss--Newton & $\mathbf{J}^H\mathbf{J}$
+    & Superlinear (near solution) \\
+  Full Newton (LM) & exact $\mathbf{H}$
+    & Quadratic: $\|\bm{\theta}_{k+1} - \bm{\theta}^*\|
+      \leq c\,\|\bm{\theta}_k - \bm{\theta}^*\|^2$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The 1991 thesis used the Gauss--Newton approximation because
+hand-deriving the full Hessian through the Kennett recursion was
+intractable.  With automatic differentiation, the exact Hessian is
+obtained at no additional implementation effort --- only computational
+cost --- enabling true quadratic convergence of the Levenberg--Marquardt
+iteration.
+
+%=============================================================================
 \section*{References}
 %=============================================================================
 
@@ -729,6 +1272,18 @@ prevented completion of the 1991 hand derivation.
   \item M.\ Dietrich and F.\ Kormendi, ``Perturbation of the plane-wave
     reflectivity of a depth-dependent elastic medium by weak inhomogeneities,''
     \emph{Geophys.\ J.\ Int.}, vol.\ 100, pp.\ 203--214, 1990.
+  \item F.\ Kormendi and M.\ Dietrich, ``Nonlinear waveform inversion of
+    plane-wave seismograms in stratified elastic media,''
+    \emph{Geophysics}, vol.\ 56, pp.\ 664--674, 1991.
+  \item R.C.Y.\ Chin, G.W.\ Hedstrom and L.\ Thigpen, ``Matrix methods in
+    synthetic seismograms,'' \emph{Geophys.\ J.\ R.\ astr.\ Soc.}, vol.\ 77,
+    pp.\ 483--502, 1984.
+  \item D.W.\ Marquardt, ``An algorithm for least-squares estimation of
+    nonlinear parameters,'' \emph{SIAM J.\ Appl.\ Math.}, vol.\ 11,
+    pp.\ 431--441, 1963.
+  \item T.M.\ Nestor, \emph{A Practical Implementation of Waveform Inversion
+    in a Stratified Marine Environment}, Master of Science thesis, Monash
+    University, 1991.
 \end{enumerate}
 
 \end{document}

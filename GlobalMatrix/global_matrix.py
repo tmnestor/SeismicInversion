@@ -16,8 +16,49 @@ from Kennett_Reflectivity.layer_model import (
 )
 
 from .layer_matrix import layer_eigenvectors, ocean_eigenvectors
+from .riccati_solver import riccati_sweep_numpy
 
 __all__ = ["gmm_reflectivity"]
+
+
+def _compute_eigenvectors(
+    nlayer: int,
+    eta: np.ndarray,
+    neta: np.ndarray,
+    rho: np.ndarray,
+    beta_c: np.ndarray,
+    thickness: np.ndarray,
+    p: complex,
+    omega: np.ndarray,
+) -> tuple[
+    dict[int, np.ndarray],
+    dict[int, np.ndarray],
+    dict[int, np.ndarray],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Precompute eigenvectors and phase factors for all layers.
+
+    Returns:
+        E_d, E_u, phase_d, e_d_oc, e_u_oc, e0
+    """
+    E_d: dict[int, np.ndarray] = {}
+    E_u: dict[int, np.ndarray] = {}
+    for j in range(1, nlayer):
+        E_d[j], E_u[j] = layer_eigenvectors(p, eta[j], neta[j], rho[j], beta_c[j])
+
+    e0 = np.exp(1j * omega * eta[0] * thickness[0])
+
+    phase_d: dict[int, np.ndarray] = {}
+    for j in range(1, nlayer - 1):
+        ph_p = np.exp(1j * omega * eta[j] * thickness[j])
+        ph_s = np.exp(1j * omega * neta[j] * thickness[j])
+        phase_d[j] = np.stack([ph_p, ph_s], axis=-1)
+
+    e_d_oc, e_u_oc = ocean_eigenvectors(p, eta[0], rho[0])
+
+    return E_d, E_u, phase_d, e_d_oc, e_u_oc, e0
 
 
 def _build_system(
@@ -199,11 +240,47 @@ def _build_system(
     return G, b, N
 
 
+def _dense_reflectivity(
+    nlayer: int,
+    eta: np.ndarray,
+    neta: np.ndarray,
+    rho: np.ndarray,
+    beta_c: np.ndarray,
+    thickness: np.ndarray,
+    p: complex,
+    omega: np.ndarray,
+) -> np.ndarray:
+    """Compute reflectivity via dense linear solve O(N^3)."""
+    G, b_vec, N = _build_system(nlayer, eta, neta, rho, beta_c, thickness, p, omega)
+    x = np.linalg.solve(G, b_vec[..., np.newaxis])[..., 0]
+    e0 = np.exp(1j * omega * eta[0] * thickness[0])
+    return e0 * x[:, 0]
+
+
+def _riccati_reflectivity(
+    nlayer: int,
+    eta: np.ndarray,
+    neta: np.ndarray,
+    rho: np.ndarray,
+    beta_c: np.ndarray,
+    thickness: np.ndarray,
+    p: complex,
+    omega: np.ndarray,
+) -> np.ndarray:
+    """Compute reflectivity via Block-Riccati sweep O(N)."""
+    E_d, E_u, phase_d, e_d_oc, e_u_oc, e0 = _compute_eigenvectors(
+        nlayer, eta, neta, rho, beta_c, thickness, p, omega
+    )
+    R, _U0_P = riccati_sweep_numpy(nlayer, E_d, E_u, phase_d, e_d_oc, e_u_oc, e0)
+    return R
+
+
 def gmm_reflectivity(
     model: LayerModel,
     p: float,
     omega: np.ndarray,
     free_surface: bool = False,
+    solver: str = "riccati",
 ) -> np.ndarray:
     """Compute plane-wave reflectivity using the Global Matrix Method.
 
@@ -212,6 +289,8 @@ def gmm_reflectivity(
         p: Horizontal slowness (ray parameter).
         omega: Angular frequencies, shape (nfreq,). Must not include DC.
         free_surface: Include free-surface reverberations.
+        solver: ``"riccati"`` (default, O(N) per frequency) or ``"dense"``
+            (O(N^3), original full-system solve).
 
     Returns:
         Complex PP reflectivity at each frequency, shape (nfreq,).
@@ -232,17 +311,17 @@ def gmm_reflectivity(
     for i in range(1, nlayer):
         neta[i] = vertical_slowness(s_s[i], cp)
 
-    # Assemble and solve
-    G, b_vec, N = _build_system(
-        nlayer, eta, neta, model.rho, beta_c, model.thickness, cp, omega
-    )
-
-    x = np.linalg.solve(G, b_vec[..., np.newaxis])[..., 0]  # (nfreq, N)
-
-    # U0^P is x[:, 0]. The reflectivity is the upgoing amplitude at the surface:
-    # R = exp(i*omega*eta0*h0) * U0^P
-    e0 = np.exp(1j * omega * eta[0] * model.thickness[0])
-    R = e0 * x[:, 0]
+    if solver == "riccati":
+        R = _riccati_reflectivity(
+            nlayer, eta, neta, model.rho, beta_c, model.thickness, cp, omega
+        )
+    elif solver == "dense":
+        R = _dense_reflectivity(
+            nlayer, eta, neta, model.rho, beta_c, model.thickness, cp, omega
+        )
+    else:
+        msg = f"Unknown solver {solver!r}, expected 'riccati' or 'dense'"
+        raise ValueError(msg) from None
 
     if free_surface:
         R = R / (1.0 + R)

@@ -19,11 +19,11 @@ figures/
 *.pdf
 
 # LaTeX aux
-latex/*.aux
-latex/*.log
-latex/*.out
-latex/*.toc
-latex/*.synctex.gz
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
 
 # macOS
 .DS_Store
