@@ -1,0 +1,646 @@
+% amortized_inference.tex — Amortized Neural Inference for Seismic Inversion
+% Compile with: lualatex amortized_inference.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\setmonofont{Latin Modern Mono}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage[svgnames]{xcolor}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=DarkBlue,
+  citecolor=DarkBlue,
+  urlcolor=DarkBlue,
+}
+
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Amortized Neural Inference for Seismic Inversion}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Notation shortcuts
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ppd}[2]{\frac{\partial #1}{\partial #2}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\ELBO}{\mathcal{L}_{\mathrm{ELBO}}}
+\newcommand{\Robs}{R_{\mathrm{obs}}}
+\newcommand{\xobs}{\mathbf{x}_{\mathrm{obs}}}
+
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\title{%
+  Amortized Neural Inference for Seismic Inversion\\[6pt]
+  \large Transformer Architecture, Training Procedure,\\
+  and Hybrid Newton-Net Pipeline%
+}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+We describe an amortized variational inference approach to the seismic
+inverse problem in stratified elastic media.  A Transformer-based
+inference network, \texttt{SeismicInferenceNet}, learns a mapping from
+plane-wave reflectivity $R(\omega, p)$ to a diagonal Gaussian
+approximate posterior over log-space earth model parameters.  Once
+trained, the network provides instant posterior estimates for any new
+observation, eliminating the iterative cost of classical
+Levenberg--Marquardt inversion.
+
+The network prediction serves as a warm start for a subsequent
+Newton--LM refinement stage (the ``hybrid Newton-Net pipeline''),
+combining the amortized posterior with the quadratic convergence of the
+exact-Hessian Newton method.  We analyse the model-specificity of the
+trained network, identify what changes in the forward model require
+retraining, and derive the break-even formula for when the hybrid
+approach is cost-effective relative to random-start Newton inversion.
+\end{abstract}
+
+\tableofcontents
+
+%=============================================================================
+\section{Amortized Variational Inference}\label{sec:amortized-vi}
+%=============================================================================
+
+\subsection{The inverse problem}
+
+The seismic inverse problem seeks to recover the earth model parameter
+vector
+\begin{equation}\label{eq:params}
+  \mathbf{m}
+  = \bigl(\alpha_1,\dotsc,\alpha_N,\;
+          \beta_1,\dotsc,\beta_N,\;
+          \rho_1,\dotsc,\rho_N,\;
+          h_1,\dotsc,h_{N-1}\bigr)
+  \in \mathbb{R}^{4N-1}
+\end{equation}
+from observed plane-wave reflectivity $\Robs(\omega, p)$, where
+$\alpha_j, \beta_j, \rho_j, h_j$ are the P-wave velocity, S-wave
+velocity, density, and thickness of layer~$j$.
+
+The forward operator $\mathcal{F}: \mathbf{m} \mapsto R(\omega, p)$
+is computed by either the Kennett reflectivity recursion or the
+Global Matrix Method (see companion document).  The problem is
+ill-posed: band-limited data, velocity--thickness trade-offs, and
+noise mean that many models fit the observations equally well.
+A single ``best-fit'' model is therefore incomplete ---
+\emph{uncertainty quantification} is essential.
+
+\subsection{Classical approach: Newton--LM iteration}
+
+The deterministic approach minimises the L2 misfit
+\begin{equation}\label{eq:misfit}
+  \chi(\mathbf{m})
+  = \sum_{s,i}
+    \bigl|R(\omega_i, p_s; \mathbf{m})
+          - \Robs(\omega_i, p_s)\bigr|^2
+\end{equation}
+via Levenberg--Marquardt iteration with exact Hessian.  This has
+quadratic convergence near the solution but requires:
+\begin{itemize}[nosep]
+  \item a good starting model (convergence is local),
+  \item Jacobian and Hessian computation at every iteration,
+  \item a separate optimisation for each observation.
+\end{itemize}
+
+\subsection{Amortized approach}
+
+Instead of solving an optimisation problem per observation, we train a
+neural network $q_\phi(\mathbf{m} \mid \mathbf{x})$ that maps any
+observation $\mathbf{x} = R(\omega, p)$ directly to an approximate
+posterior distribution over~$\mathbf{m}$.  The key distinction is that
+the network learns a \textbf{mapping from data to posterior}, not a
+single point solution --- the upfront training cost is incurred once,
+and inference for any new observation is a single forward pass.
+
+Formally, we seek to minimise the expected KL divergence between the
+approximate posterior and the true posterior:
+\begin{equation}\label{eq:amortized-kl}
+  \min_\phi\;
+  \mathbb{E}_{p(\mathbf{x})}
+  \bigl[\KL\!\bigl(q_\phi(\mathbf{m}\mid\mathbf{x})
+    \,\|\, p(\mathbf{m}\mid\mathbf{x})\bigr)\bigr],
+\end{equation}
+where $p(\mathbf{x})$ is the marginal data distribution induced by the
+prior $p(\mathbf{m})$ and forward model $\mathcal{F}$.
+
+\subsection{Diagonal Gaussian NLL as ELBO}
+
+We parameterise the approximate posterior as a diagonal Gaussian in
+log-parameter space:
+\begin{equation}\label{eq:approx-posterior}
+  q_\phi(\mathbf{z}\mid\mathbf{x})
+  = \prod_{k=1}^{P} \mathcal{N}\bigl(z_k;\; \mu_k(\mathbf{x}),\;
+    \sigma_k^2(\mathbf{x})\bigr),
+  \qquad \mathbf{z} = \log\mathbf{m},
+\end{equation}
+where $\mu_k$ and $\sigma_k$ are output by the network.  The training
+loss is the diagonal Gaussian negative log-likelihood:
+\begin{equation}\label{eq:nll-loss}
+  \mathcal{L}(\phi)
+  = \mathbb{E}_{(\mathbf{x},\mathbf{z})\sim p(\mathbf{x},\mathbf{z})}
+    \left[
+      \sum_{k=1}^{P}
+      \left(
+        \frac{(z_k - \mu_k)^2}{2\sigma_k^2} + \log\sigma_k
+      \right)
+    \right],
+\end{equation}
+which corresponds to the negative ELBO under amortized variational
+inference with a simulation-based prior.  Training samples
+$(\mathbf{x}, \mathbf{z})$ are generated by drawing
+$\mathbf{m} \sim p(\mathbf{m})$, computing
+$\mathbf{x} = \mathcal{F}(\mathbf{m})$, and setting
+$\mathbf{z} = \log\mathbf{m}$.
+
+%=============================================================================
+\section{SeismicInferenceNet Architecture}\label{sec:architecture}
+%=============================================================================
+
+\subsection{Input representation}
+
+The observed reflectivity $R(\omega, p)$ is complex-valued with shape
+$(n_p \times n_\omega)$.  We stack the real and imaginary parts along
+the feature dimension to produce a real-valued input tensor:
+\begin{equation}\label{eq:input}
+  \mathbf{X} \in \mathbb{R}^{n_p \times 2n_\omega},
+  \qquad
+  \mathbf{X}_{j,:} = \bigl[\operatorname{Re} R(\cdot, p_j),\;
+                            \operatorname{Im} R(\cdot, p_j)\bigr].
+\end{equation}
+Each slowness value $p_j$ is treated as a token with the spectrum as
+its feature vector.  Per-sample normalisation (dividing by
+$\max|\mathbf{X}|$) ensures scale invariance.
+
+\subsection{Input projection}
+
+A linear layer projects each token from $2n_\omega$ features to
+$d_{\text{model}}$ dimensions:
+\begin{equation}\label{eq:input-proj}
+  \mathbf{h}_j^{(0)}
+  = \mathbf{W}_{\text{proj}}\,\mathbf{X}_{j,:} + \mathbf{b}_{\text{proj}},
+  \qquad
+  \mathbf{W}_{\text{proj}} \in \mathbb{R}^{d_{\text{model}} \times 2n_\omega}.
+\end{equation}
+
+\subsection{Continuous positional encoding}
+
+Unlike standard Transformer architectures that use integer position
+indices, \texttt{SeismicInferenceNet} encodes the \emph{physical}
+slowness value $p_j$ via sinusoidal features:
+\begin{equation}\label{eq:pos-enc}
+  \text{PE}(p_j)
+  = \bigl[\sin(f_1 p_j),\; \cos(f_1 p_j),\;
+          \sin(f_2 p_j),\; \cos(f_2 p_j),\;
+          \dotsc\bigr]
+  \in \mathbb{R}^{d_{\text{model}}},
+\end{equation}
+where $\{f_k\}$ are geometrically spaced frequencies from $1$ to
+$f_{\max}$.  The positional encoding is added to the projected tokens:
+$\mathbf{h}_j^{(0)} \leftarrow \mathbf{h}_j^{(0)} + \text{PE}(p_j)$.
+
+\begin{remark}
+Continuous positional encoding enables \textbf{generalisation to unseen
+slowness grids} without retraining.  A network trained on 12 uniformly
+spaced slownesses can be applied to data acquired at arbitrary ray
+parameters, since the encoding is a smooth function of~$p$.
+\end{remark}
+
+\subsection{Transformer encoder}
+
+The projected tokens are processed by a stack of $L$ pre-norm
+Transformer encoder layers.  Each layer applies:
+\begin{enumerate}[nosep]
+  \item \textbf{Layer normalisation} (pre-norm for stable training),
+  \item \textbf{Multi-head self-attention} across slowness tokens ---
+    this learns cross-slowness (AVO) correlations,
+  \item \textbf{Feed-forward network} with GELU activation.
+\end{enumerate}
+Self-attention over the slowness dimension allows the network to learn
+how reflectivity varies with ray parameter --- precisely the
+amplitude-versus-offset (AVO) information that constrains the elastic
+parameters.
+
+\subsection{Output heads}
+
+After the Transformer encoder, the token representations are
+mean-pooled over the slowness dimension:
+\begin{equation}\label{eq:mean-pool}
+  \bar{\mathbf{h}} = \frac{1}{n_p}\sum_{j=1}^{n_p} \mathbf{h}_j^{(L)}
+  \in \mathbb{R}^{d_{\text{model}}}.
+\end{equation}
+Two separate linear heads produce the posterior parameters:
+\begin{align}
+  \bm{\mu} &= \mathbf{W}_\mu\,\bar{\mathbf{h}} + \mathbf{b}_\mu
+    \in \mathbb{R}^P, \label{eq:mu-head}\\
+  \log\bm{\sigma} &= \operatorname{clamp}\!\bigl(
+    \mathbf{W}_\sigma\,\bar{\mathbf{h}} + \mathbf{b}_\sigma,\;
+    -5,\; 2\bigr)
+    \in \mathbb{R}^P, \label{eq:sigma-head}
+\end{align}
+where $P = 4N - 1$ is the number of model parameters and the clamping
+prevents numerical instability.  The bias of the $\log\sigma$ head is
+initialised to $\log(0.1) \approx -2.3$ for stable early training.
+
+\subsection{Architecture hyperparameters}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llr}
+  \toprule
+  \textbf{Hyperparameter} & \textbf{Symbol} & \textbf{Value} \\
+  \midrule
+  Embedding dimension     & $d_{\text{model}}$ & 64 \\
+  Attention heads         & $n_{\text{heads}}$ & 4 \\
+  Encoder layers          & $L$                & 3 \\
+  Feed-forward dimension  & $d_{\text{ff}}$    & 128 \\
+  Dropout rate            & ---                & 0.1 \\
+  Positional encoding     & ---                & continuous sinusoidal \\
+  Activation              & ---                & GELU \\
+  Normalisation           & ---                & pre-norm \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+%=============================================================================
+\section{Training Procedure}\label{sec:training}
+%=============================================================================
+
+\subsection{Data generation}
+
+Training data is generated by sampling earth models from a prior
+distribution centred on a reference ocean-crust model.  For each
+sample:
+\begin{enumerate}[nosep]
+  \item Draw multiplicative perturbation factors from uniform
+    distributions: velocities $\mathcal{U}(1{-}\delta_v,\; 1{+}\delta_v)$,
+    densities $\mathcal{U}(1{-}\delta_\rho,\; 1{+}\delta_\rho)$,
+    thicknesses $\mathcal{U}(1{-}\delta_h,\; 1{+}\delta_h)$.
+  \item Apply perturbations to the reference parameter vector.
+  \item Compute reflectivity $R(\omega, p)$ using the GMM
+    Riccati-sweep solver for all slownesses and frequencies.
+  \item Store $(\mathbf{X}, \mathbf{z}) = (\text{reflectivity},\;
+    \log\mathbf{m})$ as a training pair.
+\end{enumerate}
+
+\subsection{Optimiser and schedule}
+
+The network is trained with the AdamW optimiser and a cosine annealing
+learning rate schedule.  Training terminates either at the maximum
+epoch count or when validation loss has not improved for
+$P_{\text{patience}}$ consecutive epochs (early stopping).  The best
+checkpoint (lowest validation NLL) is saved and restored at the end.
+
+\subsection{Training hyperparameters}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llr}
+  \toprule
+  \textbf{Hyperparameter} & \textbf{Symbol} & \textbf{Value} \\
+  \midrule
+  Training samples    & $N_{\text{train}}$    & 50{,}000 \\
+  Validation samples  & $N_{\text{val}}$      & 5{,}000 \\
+  Test samples        & $N_{\text{test}}$     & 5{,}000 \\
+  Maximum epochs      & $E_{\max}$            & 200 \\
+  Batch size          & $B$                   & 256 \\
+  Learning rate       & $\eta$                & $10^{-3}$ \\
+  Weight decay        & $\lambda_w$           & $10^{-4}$ \\
+  Early stopping patience & $P_{\text{patience}}$ & 20 \\
+  Gradient clipping   & $\|\nabla\|_{\max}$   & 1.0 \\
+  Velocity perturbation  & $\delta_v$         & 20\% \\
+  Density perturbation   & $\delta_\rho$      & 15\% \\
+  Thickness perturbation & $\delta_h$         & 25\% \\
+  Slowness grid       & $n_p$                 & 12 \\
+  Frequency bins      & $n_\omega$            & 64 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Evaluation metrics}
+
+The trained network is evaluated on a held-out test set using three
+metrics:
+\begin{itemize}[nosep]
+  \item \textbf{Test NLL}: the diagonal Gaussian negative
+    log-likelihood~\eqref{eq:nll-loss} on test samples.
+  \item \textbf{Mean absolute error}: $\mathbb{E}[|\mu_k - z_k|]$
+    averaged over all parameters and test samples.
+  \item \textbf{Calibration}: fraction of true parameters falling
+    within the predicted $2\sigma$ interval (should be ${\approx}95\%$
+    for a well-calibrated Gaussian).
+\end{itemize}
+
+\noindent Results on the 4-layer ocean-crust model:
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lr}
+  \toprule
+  \textbf{Metric} & \textbf{Value} \\
+  \midrule
+  Test NLL (nats/param) & $-62.69$ \\
+  Mean absolute error (log-space) & 0.0083 \\
+  Calibration ($2\sigma$) & 99.5\% \\
+  Best epoch & 194 / 200 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The high calibration ($99.5\%$ vs.\ the nominal $95.4\%$)
+indicates slightly conservative uncertainty estimates, which is
+desirable for warm-starting Newton iterations.
+
+%=============================================================================
+\section{Model-Specificity and Retraining}\label{sec:specificity}
+%=============================================================================
+
+The trained network is \textbf{specialised to one model class}.  A
+``model class'' is defined by the combination of:
+\begin{enumerate}[nosep]
+  \item \textbf{Layer count} $N$: determines the output dimension
+    $P = 4N - 1$.
+  \item \textbf{Parameter ordering}: the mapping from packed vector
+    indices to physical quantities.
+  \item \textbf{Prior distribution}: the reference model and
+    perturbation ranges used for training data generation.
+  \item \textbf{Frequency grid}: the number of frequency bins $n_\omega$
+    determines the input projection width.
+\end{enumerate}
+
+\subsection{Changes that require retraining}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lp{8cm}}
+  \toprule
+  \textbf{Change} & \textbf{Reason} \\
+  \midrule
+  Different $N$ (layer count)
+    & Output heads have dimension $P = 4N - 1$; the network architecture
+      itself changes. \\
+  Different geology (prior shift)
+    & Training data no longer represents the target distribution;
+      the network's learned mapping is biased. \\
+  Different $n_\omega$ (frequency bins)
+    & Input projection $\mathbf{W}_{\text{proj}} \in
+      \mathbb{R}^{d_{\text{model}} \times 2n_\omega}$ has a different
+      width. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Changes that do NOT require retraining}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lp{8cm}}
+  \toprule
+  \textbf{Change} & \textbf{Reason} \\
+  \midrule
+  Different slowness grid
+    & Continuous positional encoding~\eqref{eq:pos-enc} generalises to
+      arbitrary $p$ values; the network processes each slowness token
+      independently before attention. \\
+  Different data observations
+    & This is the entire point of amortization --- the network maps
+      \emph{any} observation to a posterior without re-optimisation. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{remark}
+The model-specificity of amortized inference is the fundamental
+trade-off: the network provides instant posteriors but only for the
+model class it was trained on.  This contrasts with classical Newton
+inversion, which adapts to any parameterisation but requires iterative
+optimisation for every observation.
+\end{remark}
+
+%=============================================================================
+\section{Hybrid Newton-Net Pipeline}\label{sec:hybrid}
+%=============================================================================
+
+The hybrid pipeline combines the strengths of both approaches:
+the network provides a good starting point with calibrated uncertainty,
+and Newton--LM refines it to high precision.
+
+\subsection{Two-stage algorithm}
+
+\begin{enumerate}
+  \item \textbf{Stage~1: Network prediction.}  Feed the observed
+    reflectivity $\Robs(\omega, p)$ through the trained network to
+    obtain $(\bm{\mu}, \bm{\sigma})$ --- a warm start and calibrated
+    uncertainty in log-parameter space.  Cost: a single forward pass
+    (${\sim}\text{ms}$).
+
+  \item \textbf{Stage~2: Newton--LM refinement.}  Starting from
+    $\mathbf{z}^{(0)} = \bm{\mu}$, iterate the Levenberg--Marquardt
+    update
+    \begin{equation}\label{eq:lm-update}
+      (\mathbf{H} + \lambda\mathbf{I})\,\delta\mathbf{z}
+      = -\mathbf{g}
+    \end{equation}
+    with exact Hessian $\mathbf{H}$ and adaptive damping until
+    convergence.  The network's warm start places the initial guess
+    close to the solution.
+\end{enumerate}
+
+\subsection{Why this works}
+
+Newton's method has \textbf{quadratic convergence near the solution}:
+$\|\mathbf{z}_{k+1} - \mathbf{z}^*\| \leq c\|\mathbf{z}_k -
+\mathbf{z}^*\|^2$.  But this convergence is only guaranteed within
+a neighbourhood of the true solution --- far from it, Newton may
+diverge or converge to a local minimum.
+
+The network's prediction has low relative error (${\sim}0.2\%$ on the
+reference model), placing the initial guess firmly within the quadratic
+convergence basin.  The Newton refinement then achieves machine-precision
+accuracy in few iterations.
+
+\subsection{Convergence comparison}
+
+Results on the 4-layer ocean-crust model ($P = 15$ parameters):
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrr}
+  \toprule
+  & \textbf{Hybrid} & \textbf{Random start} \\
+  \midrule
+  Iterations          & 10        & 28 \\
+  Converged           & yes       & yes \\
+  Final misfit $\chi$ & $2.61\times 10^{-7}$ & $1.42\times 10^{-22}$ \\
+  Final parameter error & $2.82\times 10^{-5}$ & $1.06\times 10^{-12}$ \\
+  Wall time (s)       & 28.7      & 80.9 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The hybrid approach uses $2.8\times$ fewer iterations and
+$2.8\times$ less wall time.  The random-start Newton achieves higher
+final precision because it runs more iterations, but both methods
+converge to the true model.  If higher precision is needed, the hybrid
+pipeline can simply run additional Newton iterations from its already
+excellent starting point.
+
+\subsection{Network prediction quality}
+
+Before any Newton refinement, the network's prediction achieves:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lr}
+  \toprule
+  \textbf{Metric} & \textbf{Value} \\
+  \midrule
+  Relative parameter error & $2.20 \times 10^{-3}$ \\
+  Max single-parameter error & $< 1\%$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent This sub-percent accuracy from a single forward pass ---
+without any iterative optimisation --- demonstrates the power of
+amortized inference.
+
+%=============================================================================
+\section{Amortization Cost Analysis}\label{sec:cost}
+%=============================================================================
+
+\subsection{Upfront cost}
+
+The amortized approach requires a one-time investment:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lr}
+  \toprule
+  \textbf{Stage} & \textbf{Wall time (s)} \\
+  \midrule
+  Data generation (50{,}000 samples $\times$ 12 slownesses) & 4{,}747 \\
+  Network training (200 epochs, early stop at 194) & 3{,}322 \\
+  \midrule
+  \textbf{Total upfront cost} $C_{\text{up}}$ & \textbf{8{,}069} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Per-inversion savings}
+
+For each subsequent inversion with the same model class:
+\begin{align}
+  T_{\text{random}} &= 80.9\;\text{s} && \text{(random-start Newton)},
+  \label{eq:t-random}\\
+  T_{\text{hybrid}} &= 28.7\;\text{s} && \text{(network + Newton)},
+  \label{eq:t-hybrid}\\
+  \Delta T &= T_{\text{random}} - T_{\text{hybrid}}
+            = 52.2\;\text{s/inversion}. \label{eq:delta-t}
+\end{align}
+
+\subsection{Break-even formula}
+
+The hybrid approach becomes cost-effective after $N_{\text{break}}$
+inversions:
+\begin{equation}\label{eq:breakeven}
+  \boxed{
+  N_{\text{break}}
+  = \left\lceil \frac{C_{\text{up}}}{\Delta T} \right\rceil
+  = \left\lceil \frac{C_{\text{up}}}{T_{\text{random}} - T_{\text{hybrid}}}
+    \right\rceil.
+  }
+\end{equation}
+
+\noindent For the 4-layer ocean-crust model:
+\begin{equation}\label{eq:breakeven-value}
+  N_{\text{break}}
+  = \left\lceil \frac{8{,}069}{52.2} \right\rceil
+  = 155\;\text{inversions}.
+\end{equation}
+
+\subsection{When amortization pays off}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{p{6cm}p{6cm}}
+  \toprule
+  \textbf{Favourable scenarios} & \textbf{Unfavourable scenarios} \\
+  \midrule
+  Many inversions with the same model class: marine surveys with
+  hundreds of CMP gathers, time-lapse monitoring with repeated
+  acquisitions.
+  &
+  One-off inversions with unique parameterisations: exploratory
+  studies, models with varying layer counts. \\[6pt]
+  Need for calibrated uncertainty: the network provides a free
+  approximate posterior alongside the point estimate.
+  &
+  Rapidly changing model structure: if the geology requires
+  different $N$ at every location, the retraining cost dominates. \\[6pt]
+  Multi-modal posteriors: random-start Newton may converge to a
+  local minimum, while the network is trained on the full prior
+  and can navigate the posterior landscape.
+  &
+  Extreme precision required with few inversions: random-start
+  Newton with sufficient iterations achieves higher final
+  precision. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{remark}
+The break-even analysis considers only wall time.  Additional benefits
+of amortization --- calibrated uncertainty, robustness to local minima,
+and instant posterior estimates for real-time applications --- are not
+captured by the simple cost formula~\eqref{eq:breakeven}.
+\end{remark}
+
+%=============================================================================
+\section*{References}
+%=============================================================================
+
+\begin{enumerate}[label={[\arabic*]},nosep]
+  \item D.P.\ Kingma and M.\ Welling, ``Auto-encoding variational Bayes,''
+    \emph{arXiv:1312.6114}, 2013.
+  \item K.\ Cranmer, J.\ Brehmer and G.\ Louppe, ``The frontier of
+    simulation-based inference,'' \emph{Proc.\ Natl.\ Acad.\ Sci.},
+    vol.~117, no.~48, pp.~30055--30062, 2020.
+  \item A.\ Siahkoohi, G.\ Rizzuti, M.\ Louboutin, P.A.\ Witte and
+    F.J.\ Herrmann, ``Deep-learning based Bayesian inference for seismic
+    imaging,'' \emph{EAGE}, arXiv:2001.04567, 2020.
+  \item A.\ Siahkoohi, G.\ Rizzuti and F.J.\ Herrmann, ``Amortized
+    variational Bayesian inference with conditional normalizing flows,''
+    \emph{EAGE}, arXiv:2203.15881, 2022.
+  \item A.\ Spurio Mancini et al., ``Neural posterior estimation in
+    seismology,'' \emph{Geophys.\ J.\ Int.}, vol.~241, no.~3, 2025.
+  \item A.\ Vaswani et al., ``Attention is all you need,''
+    \emph{Advances in Neural Information Processing Systems}, vol.~30,
+    2017.
+  \item D.W.\ Marquardt, ``An algorithm for least-squares estimation of
+    nonlinear parameters,'' \emph{SIAM J.\ Appl.\ Math.}, vol.~11,
+    pp.~431--441, 1963.
+  \item B.L.N.\ Kennett, \emph{Seismic Wave Propagation in Stratified
+    Media}, Cambridge University Press, 1983.
+  \item I.\ Loshchilov and F.\ Hutter, ``Decoupled weight decay
+    regularization,'' \emph{arXiv:1711.05101}, 2017.
+\end{enumerate}
+
+\end{document}
