@@ -1,0 +1,52 @@
+# Default 5-layer ocean-crust model for GMM reflectivity.
+#
+# Same model as Kennett_Reflectivity/configs/default_ocean_crust.yaml.
+# Layer 0 (Ocean) is always fixed during inversion.
+
+model:
+  layers:
+    - name: Ocean
+      alpha: 1.5
+      beta: 0.0
+      rho: 1.0
+      thickness: 2.0
+      Q_alpha: 20000
+      Q_beta: 1.0e+10
+    - name: Sediment
+      alpha: 1.6
+      beta: 0.3
+      rho: 2.0
+      thickness: 1.0
+      Q_alpha: 100
+      Q_beta: 100
+    - name: Crust
+      alpha: 3.0
+      beta: 1.5
+      rho: 3.0
+      thickness: 1.0
+      Q_alpha: 100
+      Q_beta: 100
+    - name: Upper mantle
+      alpha: 5.0
+      beta: 3.0
+      rho: 3.0
+      thickness: 1.0
+      Q_alpha: 100
+      Q_beta: 100
+    - name: Half-space
+      alpha: 2.2
+      beta: 1.1
+      rho: 1.8
+      thickness: .inf
+      Q_alpha: 100
+      Q_beta: 100
+  fixed_layers: [0]
+
+computation:
+  p_values: [0.1, 0.2, 0.3, 0.4, 0.6]
+  nfreq: 256
+  free_surface: false
+
+output:
+  directory: figures
+  formats: [reflectivity, comparison]

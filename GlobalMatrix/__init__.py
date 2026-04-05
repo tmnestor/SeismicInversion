@@ -1,0 +1,73 @@
+"""Global Matrix Method for plane-wave reflectivity in stratified elastic media.
+
+Assembles all interface conditions into a single block-tridiagonal linear system
+G x = b and solves for wave amplitudes. Mathematically equivalent to Kennett's
+recursive method, but with cheaper derivatives: factor G once and back-substitute
+for each parameter perturbation.
+
+Convention: exp(-iwt) inverse Fourier transform, depth positive downward.
+(Chin, Hedstrom & Thigpen (1984) use the conjugate exp(+iwt); all formulas here
+are adapted to the Kennett convention.)
+
+Reference: Chin, Hedstrom & Thigpen (1984), "Matrix methods in synthetic
+seismograms", Geophys. J. R. astr. Soc.
+"""
+
+from .global_matrix import gmm_reflectivity
+from .layer_matrix import (
+    layer_eigenvectors,
+    layer_eigenvectors_torch,
+    ocean_eigenvectors,
+    ocean_eigenvectors_torch,
+)
+
+__version__ = "1.0.0"
+
+__all__ = [
+    "gmm_reflectivity",
+    "gmm_reflectivity_torch",
+    "gmm_jacobian",
+    "gmm_hessian",
+    "layer_eigenvectors",
+    "layer_eigenvectors_torch",
+    "ocean_eigenvectors",
+    "ocean_eigenvectors_torch",
+    "compute_and_compare",
+    "GMMConfig",
+    "OutputConfig",
+    "load_config",
+    "save_config",
+]
+
+
+def __getattr__(name: str):
+    """Lazy-load submodules to avoid import cost when not needed."""
+    _torch_names = ("gmm_reflectivity_torch", "gmm_jacobian", "gmm_hessian")
+    if name in _torch_names:
+        from .gmm_torch import gmm_hessian, gmm_jacobian, gmm_reflectivity_torch
+
+        return {
+            "gmm_reflectivity_torch": gmm_reflectivity_torch,
+            "gmm_jacobian": gmm_jacobian,
+            "gmm_hessian": gmm_hessian,
+        }[name]
+
+    _config_names = ("GMMConfig", "OutputConfig", "load_config", "save_config")
+    if name in _config_names:
+        from .config import GMMConfig, OutputConfig, load_config, save_config
+
+        return {
+            "GMMConfig": GMMConfig,
+            "OutputConfig": OutputConfig,
+            "load_config": load_config,
+            "save_config": save_config,
+        }[name]
+
+    _cli_names = ("compute_and_compare",)
+    if name in _cli_names:
+        from .gmm_reflectivity_cli import compute_and_compare
+
+        return {"compute_and_compare": compute_and_compare}[name]
+
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg) from None

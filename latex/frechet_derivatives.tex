@@ -1,0 +1,734 @@
+% frechet_derivatives.tex — Fréchet Derivatives of the Kennett Reflectivity
+% Compile with: lualatex frechet_derivatives.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\setmonofont{Latin Modern Mono}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage[svgnames]{xcolor}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=DarkBlue,
+  citecolor=DarkBlue,
+  urlcolor=DarkBlue,
+}
+
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Fréchet Derivatives of the Kennett Reflectivity}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Notation shortcuts
+\newcommand{\dR}{\delta\mathbf{R}}
+\newcommand{\dT}{\delta\mathbf{T}}
+\newcommand{\dE}{\delta\mathbf{E}}
+\newcommand{\dM}{\delta\mathbf{M}}
+\newcommand{\dU}{\delta\mathbf{U}}
+\newcommand{\dZ}{\delta\mathbf{Z}}
+\newcommand{\dRR}{\delta\mathbf{RR}}
+\newcommand{\RR}{\mathbf{RR}}
+\newcommand{\Rd}{\mathbf{R}_d}
+\newcommand{\Ru}{\mathbf{R}_u}
+\newcommand{\Tu}{\mathbf{T}_u}
+\newcommand{\Td}{\mathbf{T}_d}
+\newcommand{\vE}{\mathbf{E}}
+\newcommand{\vM}{\mathbf{M}}
+\newcommand{\vU}{\mathbf{U}}
+\newcommand{\vZ}{\mathbf{Z}}
+\newcommand{\vI}{\mathbf{I}}
+\newcommand{\vW}{\mathbf{W}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ppd}[2]{\frac{\partial #1}{\partial #2}}
+
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}[proposition]{Lemma}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\title{%
+  Fréchet Derivatives of the Kennett Reflectivity\\[6pt]
+  \large Independent Re-derivation of Dietrich \& Kormendi (1990)%
+}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+We derive the complete Fréchet (first-order) derivatives of the plane-wave PP
+reflectivity for a stratified elastic medium, computed via Kennett's recursive
+reflectivity method.  The derivation uses tangent-linear (forward-mode)
+differentiation of the Kennett addition formula and is equivalent to the
+analytical Fréchet kernels of Dietrich \& Kormendi (1990).  Explicit formulae
+are given for the primitive derivative chains, the scattering matrix tangents,
+and the tangent-linear recursion.  We also present the structure of the
+second-order (Hessian) derivatives and identify the cross-coupling terms that
+make same-layer Hessian elements combinatorially complex.
+
+\medskip\noindent
+\textbf{Convention:}  $\exp(-i\omega t)$ inverse Fourier transform; depth
+positive downward; $\operatorname{Im}(\eta) > 0$ for vertical slowness
+(radiation condition).
+\end{abstract}
+
+\tableofcontents
+
+%=============================================================================
+\section{The Kennett Reflectivity}
+%=============================================================================
+
+The PP reflectivity of a stratified elastic half-space with $N$ sub-ocean
+layers is
+\begin{equation}\label{eq:R}
+  R(\omega, p)
+  = e_{a,0}^{2} \;\RR_d^{(0)}[0,0],
+\end{equation}
+where $e_{a,0}^{2} = \exp(2i\omega\eta_0 h_0)$ is the two-way ocean phase and
+$\RR_d^{(0)}$ is the cumulative downgoing reflection matrix at the ocean
+bottom, computed by the upward recursion described below.
+
+%=============================================================================
+\section{Kennett Addition Formula}\label{sec:addition}
+%=============================================================================
+
+At interface~$i$ (between layers~$i$ and $i{+}1$), the cumulative reflection
+from below is updated by
+\begin{equation}\label{eq:addition}
+  \RR_d^{(i)}
+  = \Rd^{(i)} + \Tu^{(i)}\,\vM\,\vU\,\Td^{(i)},
+\end{equation}
+where
+\begin{equation}\label{eq:MU}
+  \vM = \vE_{i+1}\,\RR_d^{(i+1)}\,\vE_{i+1},
+  \qquad
+  \vU = \bigl(\vI - \Ru^{(i)}\,\vM\bigr)^{-1},
+\end{equation}
+and the phase matrix is
+\begin{equation}\label{eq:E}
+  \vE_j = \operatorname{diag}\bigl(e_{a,j},\; e_{b,j}\bigr),
+  \qquad
+  e_{a,j} = \exp(i\omega\eta_j h_j),
+  \quad
+  e_{b,j} = \exp(i\omega\nu_j h_j).
+\end{equation}
+Here $\eta_j$ and $\nu_j$ are the P- and S-wave vertical slownesses,
+$h_j$ is the layer thickness, and $\Rd^{(i)}$, $\Ru^{(i)}$, $\Tu^{(i)}$,
+$\Td^{(i)}$ are the $2\times 2$ scattering matrices at interface~$i$.
+
+\medskip\noindent
+\textbf{Initialisation:}
+$\RR_d^{(N-1)} = \mathbf{0}$ (radiation condition at the half-space).
+
+%=============================================================================
+\section{Tangent-Linear Kennett Recursion}\label{sec:tangent}
+%=============================================================================
+
+Differentiating~\eqref{eq:addition} with respect to an arbitrary model
+parameter $m_j$ yields the tangent-linear recursion for $\dRR_d$:
+\begin{equation}\label{eq:tl-main}
+  \boxed{
+  \dRR_d^{(i)}
+  = \dR_d
+  + \dT_u\,\vZ\,\Td
+  + \Tu\,\dZ\,\Td
+  + \Tu\,\vZ\,\dT_d
+  }
+\end{equation}
+where $\vZ = \vM\,\vU$ and the subsidiary tangents are:
+\begin{align}
+  \dZ   &= \dM\,\vU + \vM\,\dU, \label{eq:dZ}\\[4pt]
+  \dU   &= \vU\bigl(\dR_u\,\vM + \Ru\,\dM\bigr)\vU,
+           \label{eq:dU}\\[4pt]
+  \dM   &= \dE\,\RR_d\,\vE
+         + \vE\,\dRR_d\,\vE
+         + \vE\,\RR_d\,\dE.
+           \label{eq:dM}
+\end{align}
+
+\begin{remark}
+Equation~\eqref{eq:dU} follows from the identity
+$\dd(\vW^{-1}) = \vW^{-1}\,\dd\vW\,\vW^{-1}$
+applied to $\vW = \vI - \Ru\,\vM$.
+\end{remark}
+
+\noindent\textbf{Initialisation:}
+$\dRR_d^{(N-1)} = \mathbf{0}$.
+
+%=============================================================================
+\section{Primitive Derivative Chains}\label{sec:primitives}
+%=============================================================================
+
+For a perturbation of parameter $m_j$ in layer~$j$, the following chains
+provide the tangent inputs to the scattering matrices and phase factors.
+
+\subsection{Complex slowness from velocity}
+
+From the Futterman attenuation model:
+\begin{equation}\label{eq:slowness}
+  s = \frac{2Q^2 + 2Qi}{(1+4Q^2)\,v},
+\end{equation}
+where $Q$ is the quality factor (held fixed).  Since $s$ is proportional to
+$1/v$,
+\begin{equation}\label{eq:dsdv}
+  \boxed{\ppd{s}{v} = -\frac{s}{v}.}
+\end{equation}
+
+\subsection{Vertical slowness}
+
+With $\eta = \sqrt{s^2 - p^2}$ and the branch chosen so that
+$\operatorname{Im}(\eta) > 0$:
+\begin{equation}\label{eq:detads}
+  \ppd{\eta}{s} = \frac{s}{\eta}.
+\end{equation}
+This holds for either sign of $\eta$: the branch flip $\eta\to -\eta$ leaves
+$s/\eta$ invariant.
+
+\subsection{P-wave velocity $\alpha_j$}
+
+\begin{align}
+  \ppd{s_{p,j}}{\alpha_j} &= -\frac{s_{p,j}}{\alpha_j},
+  \label{eq:dsp}\\[4pt]
+  \ppd{\eta_j}{\alpha_j}
+    &= \frac{s_{p,j}}{\eta_j}\cdot\ppd{s_{p,j}}{\alpha_j}
+     = -\frac{s_{p,j}^2}{\eta_j\,\alpha_j},
+  \label{eq:deta-alpha}\\[4pt]
+  \ppd{e_{a,j}}{\alpha_j}
+    &= i\omega h_j\;\ppd{\eta_j}{\alpha_j}\;e_{a,j}.
+  \label{eq:dea-alpha}
+\end{align}
+
+\subsection{S-wave velocity $\beta_j$}
+
+\begin{align}
+  \ppd{s_{s,j}}{\beta_j} &= -\frac{s_{s,j}}{\beta_j},
+  \qquad
+  \ppd{\nu_j}{\beta_j} = -\frac{s_{s,j}^2}{\nu_j\,\beta_j},
+  \qquad
+  \ppd{\tilde\beta_j}{\beta_j} = \frac{\tilde\beta_j}{\beta_j},
+  \label{eq:dbeta}\\[4pt]
+  \ppd{e_{b,j}}{\beta_j}
+    &= i\omega h_j\;\ppd{\nu_j}{\beta_j}\;e_{b,j},
+  \label{eq:deb-beta}
+\end{align}
+where $\tilde\beta_j = 1/s_{s,j}$ is the complex S-velocity entering the
+scattering matrices.
+
+\subsection{Density $\rho_j$}
+
+Density enters the scattering matrices directly.  It does not affect the phase
+factors ($\delta e_{a,j} = \delta e_{b,j} = 0$).
+
+\subsection{Thickness $h_j$}
+
+\begin{equation}\label{eq:dh}
+  \ppd{e_{a,j}}{h_j} = i\omega\eta_j\,e_{a,j},
+  \qquad
+  \ppd{e_{b,j}}{h_j} = i\omega\nu_j\,e_{b,j}.
+\end{equation}
+Thickness does not affect the scattering matrices.
+
+%=============================================================================
+\section{Scattering Matrix Derivatives (Solid--Solid)}\label{sec:scatmat}
+%=============================================================================
+
+\subsection{Kennett intermediate variables}
+
+At interface~$i$ between layers with properties $(\eta_1,\nu_1,\rho_1,
+\tilde\beta_1)$ above and $(\eta_2,\nu_2,\rho_2,\tilde\beta_2)$ below,
+define:
+\begin{align}
+  \mu_k &= \rho_k\,\tilde\beta_k^2, &
+  \Delta\mu &= \mu_2 - \mu_1, &
+  d &= 2\Delta\mu, \label{eq:mud}\\[4pt]
+  a &= \Delta\rho - p^2 d, &
+  b &= \rho_2 - p^2 d, &
+  c &= \rho_1 + p^2 d, \label{eq:abc}\\[4pt]
+  E &= b\eta_1 + c\eta_2, &
+  F &= b\nu_1 + c\nu_2, \label{eq:EF}\\[4pt]
+  G &= a - d\eta_1\nu_2, &
+  H &= a - d\eta_2\nu_1, \label{eq:GH}\\[4pt]
+  D &= EF + GHp^2. \label{eq:D}
+\end{align}
+
+\subsection{Unnormalised scattering elements}
+
+Define normalised variables $\hat{E} = E/D$, etc.  The six independent
+scattering elements are:
+\begin{align}
+  Q &= (b\eta_1 - c\eta_2)\,\hat{F},
+  & R &= (a + d\eta_1\nu_2)\,\hat{H}\,p^2,
+  \label{eq:QR}\\[4pt]
+  S &= \frac{(ab + cd\eta_2\nu_2)\,p}{D},
+  & T &= (b\nu_1 - c\nu_2)\,\hat{E},
+  \label{eq:ST}\\[4pt]
+  U &= (a + d\eta_2\nu_1)\,\hat{G}\,p^2,
+  & V &= \frac{(ac + bd\eta_1\nu_1)\,p}{D}.
+  \label{eq:UV}
+\end{align}
+
+\subsection{Tangent of the intermediate variables}\label{sec:tl-intermediate}
+
+For a perturbation $(\delta\eta_1, \delta\nu_1, \delta\rho_1,
+\delta\tilde\beta_1, \delta\eta_2, \delta\nu_2, \delta\rho_2,
+\delta\tilde\beta_2)$:
+\begin{align}
+  \delta\mu_k &= \delta\rho_k\,\tilde\beta_k^2
+               + 2\rho_k\tilde\beta_k\,\delta\tilde\beta_k,
+  \label{eq:dmu}\\[4pt]
+  \delta d &= 2(\delta\mu_2 - \delta\mu_1),
+  \label{eq:dd}\\[4pt]
+  \delta a &= \delta(\Delta\rho) - p^2\,\delta d,
+  \label{eq:da}\\
+  \delta b &= \delta\rho_2 - p^2\,\delta d,
+  \label{eq:db}\\
+  \delta c &= \delta\rho_1 + p^2\,\delta d,
+  \label{eq:dc}\\[4pt]
+  \delta E &= \delta b\,\eta_1 + b\,\delta\eta_1
+            + \delta c\,\eta_2 + c\,\delta\eta_2,
+  \label{eq:dE}\\
+  \delta F &= \delta b\,\nu_1 + b\,\delta\nu_1
+            + \delta c\,\nu_2 + c\,\delta\nu_2,
+  \label{eq:dF}\\[4pt]
+  \delta G &= \delta a - \delta d\,\eta_1\nu_2
+            - d\,\delta\eta_1\,\nu_2 - d\,\eta_1\,\delta\nu_2,
+  \label{eq:dG}\\
+  \delta H &= \delta a - \delta d\,\eta_2\nu_1
+            - d\,\delta\eta_2\,\nu_1 - d\,\eta_2\,\delta\nu_1,
+  \label{eq:dH}\\[4pt]
+  \delta D &= \delta E\,F + E\,\delta F
+            + (\delta G\,H + G\,\delta H)\,p^2.
+  \label{eq:dD}
+\end{align}
+
+\subsection{Tangent of the normalised variables}
+
+Using the quotient rule $\delta(X/D) = (\delta X\cdot D - X\cdot\delta D)/D^2$:
+\begin{equation}\label{eq:dhat}
+  \delta\hat{E} = \frac{\delta E\cdot D - E\cdot\delta D}{D^2},
+  \quad
+  \delta\hat{F} = \frac{\delta F\cdot D - F\cdot\delta D}{D^2},
+  \quad\text{etc.}
+\end{equation}
+
+\subsection{Tangent of the scattering elements}\label{sec:tl-scat-elem}
+
+\begin{align}
+  \delta Q &= \delta(b\eta_1 - c\eta_2)\,\hat{F}
+            + (b\eta_1 - c\eta_2)\,\delta\hat{F},
+  \label{eq:dQ}\\[4pt]
+  \delta R &= \delta(a + d\eta_1\nu_2)\,\hat{H}\,p^2
+            + (a + d\eta_1\nu_2)\,\delta\hat{H}\,p^2,
+  \label{eq:dR-scat}\\[4pt]
+  \delta S &= \frac{%
+    \delta(ab + cd\eta_2\nu_2)\cdot D
+    - (ab + cd\eta_2\nu_2)\cdot\delta D
+  }{D^2}\,p,
+  \label{eq:dS}\\[4pt]
+  \delta T &= \delta(b\nu_1 - c\nu_2)\,\hat{E}
+            + (b\nu_1 - c\nu_2)\,\delta\hat{E},
+  \label{eq:dT-scat}\\[4pt]
+  \delta U &= \delta(a + d\eta_2\nu_1)\,\hat{G}\,p^2
+            + (a + d\eta_2\nu_1)\,\delta\hat{G}\,p^2,
+  \label{eq:dU-scat}\\[4pt]
+  \delta V &= \frac{%
+    \delta(ac + bd\eta_1\nu_1)\cdot D
+    - (ac + bd\eta_1\nu_1)\cdot\delta D
+  }{D^2}\,p.
+  \label{eq:dV}
+\end{align}
+
+The product-rule expansions needed in~\eqref{eq:dQ}--\eqref{eq:dV} are:
+\begin{align}
+  \delta(b\eta_1 - c\eta_2) &= \delta b\,\eta_1 + b\,\delta\eta_1
+                              - \delta c\,\eta_2 - c\,\delta\eta_2,
+  \label{eq:d-bec}\\
+  \delta(a + d\eta_1\nu_2) &= \delta a + \delta d\,\eta_1\nu_2
+                             + d\,\delta\eta_1\,\nu_2 + d\,\eta_1\,\delta\nu_2,
+  \label{eq:d-adn}\\
+  \delta(b\nu_1 - c\nu_2) &= \delta b\,\nu_1 + b\,\delta\nu_1
+                            - \delta c\,\nu_2 - c\,\delta\nu_2,
+  \label{eq:d-bnc}\\
+  \delta(a + d\eta_2\nu_1) &= \delta a + \delta d\,\eta_2\nu_1
+                             + d\,\delta\eta_2\,\nu_1 + d\,\eta_2\,\delta\nu_1,
+  \label{eq:d-adn2}\\
+  \delta(ab + cd\eta_2\nu_2) &= \delta a\,b + a\,\delta b
+    + \delta c\,d\eta_2\nu_2 + c\,\delta d\,\eta_2\nu_2
+    + cd\,\delta\eta_2\,\nu_2 + cd\,\eta_2\,\delta\nu_2,
+  \label{eq:d-abcd}\\
+  \delta(ac + bd\eta_1\nu_1) &= \delta a\,c + a\,\delta c
+    + \delta b\,d\eta_1\nu_1 + b\,\delta d\,\eta_1\nu_1
+    + bd\,\delta\eta_1\,\nu_1 + bd\,\eta_1\,\delta\nu_1.
+  \label{eq:d-acbd}
+\end{align}
+
+\subsection{Tangent of the $2\times 2$ scattering matrices}\label{sec:tl-scatmat}
+
+Define the auxiliary square-root quantities:
+\begin{equation}\label{eq:sqrts}
+  \hat\eta_k = \sqrt{\eta_k},\quad
+  \hat\nu_k = \sqrt{\nu_k},\quad
+  \hat\rho_k = \sqrt{\rho_k},\quad
+  \hat{z}_{a,k} = \hat\eta_k\hat\rho_k,\quad
+  \hat{z}_{b,k} = \hat\nu_k\hat\rho_k.
+\end{equation}
+Their tangents are $\delta\hat\eta_k = \delta\eta_k/(2\hat\eta_k)$,\;
+$\delta\hat\rho_k = \delta\rho_k/(2\hat\rho_k)$, etc., and
+\begin{equation}\label{eq:dz}
+  \delta\hat{z}_{a,k}
+  = \delta\hat\eta_k\,\hat\rho_k + \hat\eta_k\,\delta\hat\rho_k,
+  \qquad
+  \delta\hat{z}_{b,k}
+  = \delta\hat\nu_k\,\hat\rho_k + \hat\nu_k\,\delta\hat\rho_k.
+\end{equation}
+
+The scattering matrices and their tangents are:
+\begin{equation}\label{eq:dRd}
+  \dR_d = \begin{pmatrix}
+    \delta Q - \delta R
+    & -2i\bigl(\delta\hat\eta_1\,\hat\nu_1 + \hat\eta_1\,\delta\hat\nu_1\bigr)S
+      - 2i\hat\eta_1\hat\nu_1\,\delta S \\[4pt]
+    \text{(sym)}
+    & \delta T - \delta U
+  \end{pmatrix},
+\end{equation}
+
+\begin{equation}\label{eq:dTd}
+  \dT_d = \begin{pmatrix}
+    2\bigl(\delta\hat{z}_{a,1}\hat{z}_{a,2} + \hat{z}_{a,1}\delta\hat{z}_{a,2}\bigr)\hat{F}
+    + 2\hat{z}_{a,1}\hat{z}_{a,2}\,\delta\hat{F}
+    & \cdots \\[4pt]
+    \cdots
+    & 2\bigl(\delta\hat{z}_{b,1}\hat{z}_{b,2} + \hat{z}_{b,1}\delta\hat{z}_{b,2}\bigr)\hat{E}
+    + 2\hat{z}_{b,1}\hat{z}_{b,2}\,\delta\hat{E}
+  \end{pmatrix},
+\end{equation}
+
+\begin{equation}\label{eq:dTu}
+  \dT_u = (\dT_d)^T \qquad\text{(reciprocity)},
+\end{equation}
+
+\begin{equation}\label{eq:dRu}
+  \dR_u = \begin{pmatrix}
+    -(\delta Q + \delta U)
+    & -2i\bigl(\delta\hat\eta_2\hat\nu_2 + \hat\eta_2\delta\hat\nu_2\bigr)V
+      - 2i\hat\eta_2\hat\nu_2\,\delta V \\[4pt]
+    \text{(sym)}
+    & -(\delta T + \delta R)
+  \end{pmatrix}.
+\end{equation}
+
+%=============================================================================
+\section{Locality of the Perturbation}\label{sec:locality}
+%=============================================================================
+
+For a parameter $m_j$ belonging to layer~$j$, non-zero tangent inputs occur
+only at:
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  \textbf{Source} & \textbf{Affected interface} & \textbf{Role of layer~$j$}\\
+  \midrule
+  $\dR_d,\,\dR_u,\,\dT_u,\,\dT_d$ & $j{-}1$ & ``layer 2'' (below)\\
+  $\dR_d,\,\dR_u,\,\dT_u,\,\dT_d$ & $j$ (if $< N{-}1$) & ``layer 1'' (above)\\
+  $\dE_j$ & phase through layer~$j$ & $\delta e_{a,j},\,\delta e_{b,j}$\\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent All other interfaces have
+$\dR_d = \dR_u = \dT_u = \dT_d = \mathbf{0}$ and $\dE = \mathbf{0}$.
+The tangent-linear recursion~\eqref{eq:tl-main} merely propagates $\dRR_d$
+through the unperturbed Kennett addition formula at those interfaces.
+
+%=============================================================================
+\section{Complete Jacobian}\label{sec:jacobian}
+%=============================================================================
+
+The full Jacobian has shape $(\text{nfreq}) \times (4N{-}1)$ where $N$ is the
+number of sub-ocean layers:
+\begin{equation}\label{eq:Jij}
+  J_{ij}
+  = \ppd{R(\omega_i)}{m_j}
+  = e_{a,0}^2(\omega_i) \cdot \dRR_d^{(0)}[0,0]\bigg|_{m_j}.
+\end{equation}
+
+The parameter vector is:
+\begin{equation}\label{eq:params}
+  \mathbf{m}
+  = \bigl[\alpha_1,\dotsc,\alpha_N,\;
+          \beta_1,\dotsc,\beta_N,\;
+          \rho_1,\dotsc,\rho_N,\;
+          h_1,\dotsc,h_{N-1}\bigr].
+\end{equation}
+
+\begin{remark}
+The half-space layer ($h_N = \infty$) is excluded from the parameter vector
+because its thickness is not a free parameter.
+\end{remark}
+
+%=============================================================================
+\section{Equivalence to Dietrich \& Kormendi (1990)}\label{sec:DK}
+%=============================================================================
+
+The tangent-linear recursion derived above is the \emph{forward-mode automatic
+differentiation} of the Kennett recursion.  It computes the exact same quantity
+as the Dietrich \& Kormendi (1990) analytical Fréchet derivative, expressed as
+a recursion over interfaces rather than an integral over Green's functions.
+
+D\&K's Fréchet kernel for a continuously varying medium is
+\begin{equation}\label{eq:DK-integral}
+  \delta R = \int_0^\infty G^{\uparrow}(z)\;\delta\mathbf{P}(z)\;
+  G^{\downarrow}(z)\,\dd z,
+\end{equation}
+where $G^{\uparrow}$ and $G^{\downarrow}$ are the upgoing and downgoing
+Green's function operators and $\delta\mathbf{P}$ is the first-order
+perturbation of the propagator.  For a stack of homogeneous layers this
+integral collapses to a finite sum over the interfaces where elastic
+properties are discontinuous.
+
+\subsection{The four partitions}\label{sec:four-partitions}
+
+At each interface~$i$ where scattering is perturbed, the tangent-linear
+recursion~\eqref{eq:tl-main} decomposes the contribution to
+$\dRR_d^{(i)}$ into exactly four partitions:
+\begin{equation}\label{eq:4part}
+  \dRR_d^{(i)}
+  = \underbrace{\dR_d^{(i)}}_{P_1}
+  + \underbrace{\dT_u^{(i)}\,\vZ^{(i)}\,\Td^{(i)}}_{P_2}
+  + \underbrace{\Tu^{(i)}\,\dZ^{(i)}\,\Td^{(i)}}_{P_3}
+  + \underbrace{\Tu^{(i)}\,\vZ^{(i)}\,\dT_d^{(i)}}_{P_4},
+\end{equation}
+where $\vZ^{(i)} = \vM^{(i)}\,\vU^{(i)}$ as before.  Each partition
+corresponds to a distinct physical scattering pathway:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{clp{7.5cm}}
+  \toprule
+  & \textbf{Partition} & \textbf{Physical pathway} \\
+  \midrule
+  $P_1$ & $\dR_d$
+    & Downgoing wave reflects off the \emph{perturbed} interface.
+      No interaction with the stack below. \\
+  $P_2$ & $\dT_u\,\vZ\,\Td$
+    & Wave transmits down (unperturbed), reverberates in the
+      stack below (unperturbed), then transmits up through the
+      \emph{perturbed} interface. \\
+  $P_3$ & $\Tu\,\dZ\,\Td$
+    & Wave enters and exits the interface unperturbed, but the
+      \emph{reverberation} between $\Ru$ and the stack below is
+      perturbed (contains $\dR_u$, $\dE$, and propagated
+      $\dRR_d$; see below). \\
+  $P_4$ & $\Tu\,\vZ\,\dT_d$
+    & Wave transmits down through the \emph{perturbed} interface,
+      reverberates unperturbed below, and transmits up
+      unperturbed. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Internal structure of $P_3$}\label{sec:P3}
+
+Partition~$P_3$ is the richest because $\dZ = \dM\,\vU + \vM\,\dU$
+contains three physically distinct sub-contributions via $\dM$ and
+$\dU$:
+
+\begin{enumerate}[label=(\alph*),nosep]
+  \item \textbf{Phase perturbation} ($\dE$ terms in $\dM$):
+    $\dE\,\RR_d\,\vE + \vE\,\RR_d\,\dE$.
+    A wave traversing layer~$j$ accumulates a perturbed phase; the
+    cumulative reflection from below is unperturbed.
+  \item \textbf{Propagated tangent from below} ($\dRR_d$ term in $\dM$):
+    $\vE\,\dRR_d\,\vE$.
+    First-order perturbations originating at deeper interfaces propagate
+    upward through the unperturbed phase and enter the current interface.
+  \item \textbf{Upgoing reflection perturbation} ($\dR_u$ in $\dU$):
+    $\vU\,\dR_u\,\vM\,\vU$.
+    The reverberative coupling between the interface and the stack below
+    is perturbed because $\Ru$ changes.
+\end{enumerate}
+
+\noindent Combining these with the definition $\dU =
+\vU(\dR_u\,\vM + \Ru\,\dM)\vU$ from~\eqref{eq:dU}, partition~$P_3$
+expands to:
+\begin{equation}\label{eq:P3-expand}
+  P_3 = \Tu\Bigl[
+    \underbrace{\dM\,\vU}_{\text{(a)+(b)}}
+    + \underbrace{\vM\,\vU\bigl(\dR_u\,\vM
+      + \Ru\,\dM\bigr)\vU}_{\text{(c) + reverb of (a)+(b)}}
+  \Bigr]\Td.
+\end{equation}
+
+\subsection{Correspondence to the D\&K Green's functions}
+
+In~\eqref{eq:DK-integral}, the operators $G^{\uparrow}$ and
+$G^{\downarrow}$ encode cumulative transmission through all overlying
+and underlying interfaces.  In the Kennett recursive framework these
+operators are not formed explicitly; instead, the upward sweep of the
+tangent-linear recursion~\eqref{eq:tl-main} through \emph{unperturbed}
+interfaces acts as the propagator:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lp{9cm}}
+  \toprule
+  \textbf{D\&K operator} & \textbf{Kennett equivalent} \\
+  \midrule
+  $G^{\downarrow}(z_i)$
+    & Encoded in $\RR_d^{(i+1)}$: the cumulative downgoing reflection
+      of the entire stack below interface~$i$. \\
+  $G^{\uparrow}(z_i)$
+    & Encoded in the unperturbed Kennett addition steps at
+      interfaces $i{-}1, i{-}2, \dotsc, 0$ that propagate $\dRR_d$
+      from interface~$i$ up to the surface. \\
+  $\delta\mathbf{P}(z_i)$
+    & The 4-partition decomposition: $(\dR_d,\dT_u,\dR_u,\dT_d)$ at the
+      interface, plus $\dE$ in the adjacent layer.  These are the
+      ``source terms'' that inject the perturbation into the recursion.\\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The equivalence is exact: the tangent-linear recursion computes
+the same Fréchet derivative as D\&K's integral kernel, partition by
+partition, with no approximation.
+
+\begin{proposition}[Numerical validation]
+The AD Jacobian (\texttt{torch.autograd}) agrees with this tangent-linear
+Jacobian (NumPy) to $< 10^{-10}$ relative error, and both agree with
+central finite differences to $< 10^{-5}$.
+\end{proposition}
+
+%=============================================================================
+\section{Ocean-Bottom Interface (Acoustic--Elastic)}\label{sec:ocean}
+%=============================================================================
+
+The ocean-bottom interface has the same structure as solid--solid
+(Section~\ref{sec:scatmat}), with the simplifications:
+\begin{itemize}[nosep]
+  \item $\nu_1 = 0$ (no shear in ocean),
+  \item $\tilde\beta_1 = 0$,
+  \item $F = b$ (not $b\nu_1 + c\nu_2$),
+  \item $H = -d\eta_2$ (not $a - d\eta_2\nu_1$),
+  \item $\Rd$ has only the $[0,0]$ entry nonzero (P$\to$P only from above),
+  \item $\Td$ has column~1 zero (no downgoing S from ocean),
+  \item $\Tu$ has row~1 zero (no upgoing S to ocean).
+\end{itemize}
+
+\noindent Ocean parameters (layer~0) are fixed:
+$\delta\eta_1 = \delta\rho_1 = 0$.
+
+%=============================================================================
+\section{Second-Order Derivatives (Hessian)}\label{sec:hessian}
+%=============================================================================
+
+\subsection{Structure of the misfit Hessian}
+
+For a scalar L2 misfit $\chi = \sum_i |R(\omega_i) - R_{\text{obs}}(\omega_i)|^2$,
+the Hessian is:
+\begin{equation}\label{eq:hessian}
+  H_{kl}
+  = \ppd{{}^2\chi}{m_k\,\partial m_l}
+  = \underbrace{%
+    \operatorname{Re}\!\sum_i
+    \overline{\ppd{R_i}{m_k}}\,\ppd{R_i}{m_l}
+  }_{\text{Gauss--Newton}}
+  + \underbrace{%
+    \operatorname{Re}\!\sum_i
+    \overline{r_i}\,\ppd{{}^2 R_i}{m_k\,\partial m_l}
+  }_{\text{second-order}},
+\end{equation}
+where $r_i = R(\omega_i) - R_{\text{obs}}(\omega_i)$.
+
+The Gauss--Newton term uses only the first-order Jacobian.  The second-order
+term involves $\partial^2 R/\partial m_k\,\partial m_l$, which requires
+differentiating the tangent-linear recursion a second time.
+
+\subsection{Same-layer cross-terms}\label{sec:crossterms}
+
+When $m_k$ and $m_l$ belong to the \emph{same} layer~$j$, the second-order
+tangent-linear $\delta^2\RR_d$ receives contributions from three sources:
+\begin{enumerate}[nosep]
+  \item[\textbf{S1}:] Scattering at interface $j{-}1$ (layer~$j$ below),
+  \item[\textbf{S2}:] Scattering at interface $j$ (layer~$j$ above),
+  \item[\textbf{P}:]  Phase through layer~$j$.
+\end{enumerate}
+
+The \textbf{cross-coupling terms} S1$\times$S2, S1$\times$P, and
+S2$\times$P arise because the Kennett recursion chains these three
+contributions together.  The key cross-term is in $\delta^2\vM$:
+\begin{equation}\label{eq:d2M}
+  \delta^2\vM
+  = 2\,\delta_k\vE\;\delta_l\RR_d\;\vE
+  + 2\,\vE\;\delta_l\RR_d\;\delta_k\vE
+  + \delta_k\vE\;\RR_d\;\delta_l\vE
+  + \delta_l\vE\;\RR_d\;\delta_k\vE
+  + \vE\;\delta^2\RR_d\;\vE
+  + \dotsb
+\end{equation}
+where $\delta_k$ and $\delta_l$ denote tangent-linear operations with respect
+to $m_k$ and $m_l$ respectively.
+
+The terms $\delta_k\vE\cdot\delta_l\RR_d\cdot\vE$ couple the accumulated
+first-order tangent from below ($\delta_l\RR_d$) with the local phase
+perturbation ($\delta_k\vE$).  This is the scattering$\times$phase cross-term
+that was identified as missing from the 1991 thesis derivation.
+
+\subsection{Magnitude of cross-terms}
+
+Numerical experiments on a 5-layer ocean--crust model (5\% perturbation in
+$\alpha_2$) show:
+\begin{center}
+\begin{tabular}{lc}
+  \toprule
+  \textbf{Cross-term} & \textbf{Relative to max diagonal}\\
+  \midrule
+  $\alpha\times h$ & 67\%\\
+  $\alpha\times\rho$ & 17\%\\
+  $\beta\times h$ & 45\%\\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\noindent These cross-terms are large enough that the Gauss--Newton
+approximation (which neglects the second-order term entirely) and
+hand-derivations that miss cross-couplings are both inadequate for
+Newton-type inversion.
+
+\subsection{Automatic differentiation resolves the problem}
+
+The PyTorch implementation computes the exact Hessian via
+\texttt{torch.autograd.functional.hessian}, which differentiates the
+computational graph twice without any manual derivation.\linebreak  This automatically
+captures \emph{all} cross-terms, resolving the combinatorial complexity that
+prevented completion of the 1991 hand derivation.
+
+%=============================================================================
+\section*{References}
+%=============================================================================
+
+\begin{enumerate}[label={[\arabic*]},nosep]
+  \item B.L.N.\ Kennett, \emph{Seismic Wave Propagation in Stratified Media},
+    Cambridge University Press, 1983.
+  \item M.\ Dietrich and F.\ Kormendi, ``Perturbation of the plane-wave
+    reflectivity of a depth-dependent elastic medium by weak inhomogeneities,''
+    \emph{Geophys.\ J.\ Int.}, vol.\ 100, pp.\ 203--214, 1990.
+\end{enumerate}
+
+\end{document}

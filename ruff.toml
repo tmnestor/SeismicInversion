@@ -1,0 +1,9 @@
+[lint]
+ignore = ["ARG001", "ARG002", "F841"]
+
+[lint.per-file-ignores]
+# Investigation/benchmark scripts use lambdas capturing loop variables intentionally
+"GlobalMatrix/bench_ad.py" = ["B023"]
+"GlobalMatrix/investigate_*.py" = ["B023"]
+# example_usage.py has sys.path manipulation before imports
+"Kennett_Reflectivity/example_usage.py" = ["E402"]

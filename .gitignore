@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Output artifacts
+figures/
+*.npz
+*.png
+
+# PDFs (papers, large binaries)
+*.pdf
+
+# LaTeX aux
+latex/*.aux
+latex/*.log
+latex/*.out
+latex/*.toc
+latex/*.synctex.gz
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
