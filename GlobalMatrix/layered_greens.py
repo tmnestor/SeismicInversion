@@ -23,10 +23,13 @@ from .layer_matrix import (
 __all__ = [
     "assemble_greens_6x6",
     "layered_greens_6x6",
+    "layered_greens_9x9",
     "layered_greens_psv",
     "layered_greens_sh",
     "riccati_greens_psv",
     "riccati_greens_sh",
+    "strain_from_displacement_traction",
+    "traction_from_strain",
 ]
 
 _CD = np.complex128
@@ -697,3 +700,173 @@ def layered_greens_6x6(
     G6 = assemble_greens_6x6(G_psv, G_sh, cos_phi, sin_phi, omega)
 
     return G6.reshape(orig_shape + (6, 6))
+
+
+# ---------------------------------------------------------------------------
+# 9×9 Displacement-Strain Basis Conversion
+# ---------------------------------------------------------------------------
+
+
+def _interface_elastic_properties(
+    model: "LayerModel", iface: int
+) -> tuple[float, float, float]:
+    """Elastic properties for the layer at an interface.
+
+    Uses layer ``max(iface, 1)`` so that ocean-bottom scatterers fall
+    back to the first solid layer.
+
+    Args:
+        model: Stratified elastic model.
+        iface: Interface index.
+
+    Returns:
+        (rho, alpha, beta) — density, P-wave velocity, S-wave velocity.
+    """
+    j = max(iface, 1)
+    return float(model.rho[j]), float(model.alpha[j]), float(model.beta[j])
+
+
+def strain_from_displacement_traction(
+    kx: np.ndarray,
+    ky: np.ndarray,
+    rho: float,
+    alpha: float,
+    beta: float,
+) -> np.ndarray:
+    """Receiver-side A matrix: (u, t) → (u, ε), vectorised over (kx, ky).
+
+    Maps the 6-component displacement-traction state
+    ``(u_z, u_x, u_y, σ_zz, σ_xz, σ_yz)`` to the 9-component
+    displacement-strain state
+    ``(u_z, u_x, u_y, ε_zz, ε_xx, ε_yy, 2ε_xy, 2ε_zy, 2ε_zx)``.
+
+    Args:
+        kx: Horizontal wavenumber x-component, arbitrary shape.
+        ky: Horizontal wavenumber y-component, same shape as kx.
+        rho: Density at the interface.
+        alpha: P-wave velocity at the interface.
+        beta: S-wave velocity at the interface.
+
+    Returns:
+        A: shape ``(*kx.shape, 9, 6)``.
+    """
+    mu = rho * beta**2
+    lam = rho * alpha**2 - 2 * mu
+    M2 = lam + 2 * mu
+
+    shape = kx.shape
+    A = np.zeros(shape + (9, 6), dtype=_CD)
+
+    # Displacement passthrough: top-left 3×3 = I
+    A[..., 0, 0] = 1.0
+    A[..., 1, 1] = 1.0
+    A[..., 2, 2] = 1.0
+
+    ikx = 1j * kx
+    iky = 1j * ky
+
+    # ε_zz = (σ_zz − λ·ikx·u_x − λ·iky·u_y) / (λ + 2μ)
+    A[..., 3, 1] = -lam / M2 * ikx
+    A[..., 3, 2] = -lam / M2 * iky
+    A[..., 3, 3] = 1.0 / M2
+
+    # ε_xx = ikx · u_x
+    A[..., 4, 1] = ikx
+
+    # ε_yy = iky · u_y
+    A[..., 5, 2] = iky
+
+    # 2ε_xy = iky · u_x + ikx · u_y
+    A[..., 6, 1] = iky
+    A[..., 6, 2] = ikx
+
+    # 2ε_zy = σ_yz / μ
+    if mu != 0:
+        A[..., 7, 5] = 1.0 / mu
+
+    # 2ε_zx = σ_xz / μ
+    if mu != 0:
+        A[..., 8, 4] = 1.0 / mu
+
+    return A
+
+
+def traction_from_strain(
+    rho: float,
+    alpha: float,
+    beta: float,
+) -> np.ndarray:
+    """Source-side B matrix: (u, ε) → (u, t), wavenumber-independent.
+
+    Maps the 9-component displacement-strain state
+    ``(u_z, u_x, u_y, ε_zz, ε_xx, ε_yy, 2ε_xy, 2ε_zy, 2ε_zx)``
+    to the 6-component displacement-traction state
+    ``(u_z, u_x, u_y, σ_zz, σ_xz, σ_yz)`` via Hooke's law.
+
+    Args:
+        rho: Density at the interface.
+        alpha: P-wave velocity at the interface.
+        beta: S-wave velocity at the interface.
+
+    Returns:
+        B: shape ``(6, 9)``.
+    """
+    mu = rho * beta**2
+    lam = rho * alpha**2 - 2 * mu
+
+    # Isotropic Voigt stiffness C (6×6)
+    # Voigt ordering: (σ_zz, σ_xx, σ_yy, σ_xy, σ_zy, σ_zx)
+    C = np.zeros((6, 6), dtype=np.float64)
+    C[0, 0] = C[1, 1] = C[2, 2] = lam + 2 * mu
+    C[0, 1] = C[0, 2] = C[1, 0] = lam
+    C[1, 2] = C[2, 0] = C[2, 1] = lam
+    C[3, 3] = C[4, 4] = C[5, 5] = mu
+
+    # Traction extraction P (3×6): selects (σ_zz, σ_xz, σ_yz) from Voigt stress
+    P = np.zeros((3, 6), dtype=np.float64)
+    P[0, 0] = 1.0  # σ_zz
+    P[1, 5] = 1.0  # σ_xz = σ_zx (Voigt index 5)
+    P[2, 4] = 1.0  # σ_yz = σ_zy (Voigt index 4)
+
+    B = np.zeros((6, 9), dtype=_CD)
+    B[:3, :3] = np.eye(3)
+    B[3:, 3:] = P @ C
+
+    return B
+
+
+def layered_greens_9x9(
+    model: "LayerModel",
+    omega: complex,
+    kx: np.ndarray,
+    ky: np.ndarray,
+    source_iface: int,
+    receiver_iface: int,
+) -> np.ndarray:
+    """9×9 displacement-strain Green's function.
+
+    Computed as ``G_9x9 = A_recv @ G_6x6 @ B_source``, where *A* converts
+    receiver-side (u, t) → (u, ε) and *B* converts source-side (u, ε) → (u, t).
+
+    Args:
+        model: Stratified elastic model.
+        omega: Angular frequency (scalar, may be complex).
+        kx: Horizontal wavenumber x-component, arbitrary shape.
+        ky: Horizontal wavenumber y-component, same shape as kx.
+        source_iface: Interface index for source (0 = ocean bottom).
+        receiver_iface: Interface index for receiver.
+
+    Returns:
+        G9: shape ``(*kx.shape, 9, 9)`` in basis
+            ``(u_z, u_x, u_y, ε_zz, ε_xx, ε_yy, 2ε_xy, 2ε_zy, 2ε_zx)``.
+    """
+    G6 = layered_greens_6x6(model, omega, kx, ky, source_iface, receiver_iface)
+
+    rho_r, alpha_r, beta_r = _interface_elastic_properties(model, receiver_iface)
+    A = strain_from_displacement_traction(kx, ky, rho_r, alpha_r, beta_r)
+
+    rho_s, alpha_s, beta_s = _interface_elastic_properties(model, source_iface)
+    B = traction_from_strain(rho_s, alpha_s, beta_s)
+
+    # G9 = A @ G6 @ B: A is (*shape, 9, 6), G6 is (*shape, 6, 6), B is (6, 9)
+    return np.einsum("...ij,...jk,kl->...il", A, G6, B)

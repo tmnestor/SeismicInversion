@@ -23,7 +23,7 @@ from .layer_matrix import (
     ocean_eigenvectors_batched,
     ocean_eigenvectors_torch,
 )
-from .layered_greens import layered_greens_6x6, layered_greens_psv
+from .layered_greens import layered_greens_6x6, layered_greens_9x9, layered_greens_psv
 from .riccati_solver import compute_source_vector
 
 __version__ = "1.0.0"
@@ -39,6 +39,7 @@ __all__ = [
     "layer_eigenvectors_sh_batched",
     "layer_eigenvectors_torch",
     "layered_greens_6x6",
+    "layered_greens_9x9",
     "layered_greens_psv",
     "ocean_eigenvectors",
     "ocean_eigenvectors_batched",
@@ -51,6 +52,12 @@ __all__ = [
     "invert_taup",
     "InversionResult",
     "compute_taup_traces",
+    "InterlayerMSResult",
+    "InterlayerMSResult9x9",
+    "ScattererSlab",
+    "ScattererSlab9x9",
+    "interlayer_ms_reflectivity",
+    "interlayer_ms_reflectivity_9x9",
 ]
 
 
@@ -92,6 +99,33 @@ def __getattr__(name: str):
         from .gmm_reflectivity_cli import compute_and_compare
 
         return {"compute_and_compare": compute_and_compare}[name]
+
+    _ms_names = (
+        "InterlayerMSResult",
+        "InterlayerMSResult9x9",
+        "ScattererSlab",
+        "ScattererSlab9x9",
+        "interlayer_ms_reflectivity",
+        "interlayer_ms_reflectivity_9x9",
+    )
+    if name in _ms_names:
+        from .interlayer_ms import (
+            InterlayerMSResult,
+            InterlayerMSResult9x9,
+            ScattererSlab,
+            ScattererSlab9x9,
+            interlayer_ms_reflectivity,
+            interlayer_ms_reflectivity_9x9,
+        )
+
+        return {
+            "InterlayerMSResult": InterlayerMSResult,
+            "InterlayerMSResult9x9": InterlayerMSResult9x9,
+            "ScattererSlab": ScattererSlab,
+            "ScattererSlab9x9": ScattererSlab9x9,
+            "interlayer_ms_reflectivity": interlayer_ms_reflectivity,
+            "interlayer_ms_reflectivity_9x9": interlayer_ms_reflectivity_9x9,
+        }[name]
 
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg) from None

@@ -13,12 +13,16 @@ from .layer_matrix import (
     ocean_eigenvectors_batched,
 )
 from .layered_greens import (
+    _interface_elastic_properties,
     _prepare_model_arrays,
     _vertical_slowness_batched,
     layered_greens_6x6,
+    layered_greens_9x9,
     layered_greens_psv,
     layered_greens_sh,
     riccati_greens_psv,
+    strain_from_displacement_traction,
+    traction_from_strain,
 )
 
 
@@ -513,3 +517,164 @@ class TestEdgeCases:
         )
         assert G.shape == (2, 4, 4)
         assert np.all(np.isfinite(G))
+
+
+# ===== Phase 6: 9×9 basis conversion =====
+
+
+class TestBasisConversion9x9:
+    """Tests for strain_from_displacement_traction (A) and traction_from_strain (B)."""
+
+    RHO, ALPHA, BETA = 2.5, 3.0, 1.5
+
+    def test_A_shape_1d(self):
+        """A matrix has correct shape for 1D wavenumber arrays."""
+        kx = np.array([1.0, 2.0, 3.0])
+        ky = np.array([0.5, 1.0, 1.5])
+        A = strain_from_displacement_traction(kx, ky, self.RHO, self.ALPHA, self.BETA)
+        assert A.shape == (3, 9, 6)
+
+    def test_A_shape_scalar(self):
+        """A matrix has correct shape for scalar wavenumber (0-d array)."""
+        kx = np.array(2.0)
+        ky = np.array(1.0)
+        A = strain_from_displacement_traction(kx, ky, self.RHO, self.ALPHA, self.BETA)
+        assert A.shape == (9, 6)
+
+    def test_A_displacement_passthrough(self):
+        """Top-left 3×3 block of A is identity."""
+        kx = np.array([1.0, 3.0])
+        ky = np.array([0.5, 2.0])
+        A = strain_from_displacement_traction(kx, ky, self.RHO, self.ALPHA, self.BETA)
+        for i in range(len(kx)):
+            np.testing.assert_array_equal(A[i, :3, :3], np.eye(3))
+
+    def test_A_specific_entries(self):
+        """Verify specific A matrix entries against known formulae."""
+        kx_val, ky_val = 2.0, 1.5
+        kx = np.array([kx_val])
+        ky = np.array([ky_val])
+        A = strain_from_displacement_traction(kx, ky, self.RHO, self.ALPHA, self.BETA)
+
+        mu = self.RHO * self.BETA**2
+        lam = self.RHO * self.ALPHA**2 - 2 * mu
+        M2 = lam + 2 * mu
+
+        # ε_zz row: A[3, 1] = -lam/M2 * ikx
+        np.testing.assert_allclose(A[0, 3, 1], -lam / M2 * 1j * kx_val)
+        # ε_zz row: A[3, 3] = 1/M2
+        np.testing.assert_allclose(A[0, 3, 3], 1.0 / M2)
+        # ε_xx row: A[4, 1] = ikx
+        np.testing.assert_allclose(A[0, 4, 1], 1j * kx_val)
+        # 2ε_zx row: A[8, 4] = 1/mu
+        np.testing.assert_allclose(A[0, 8, 4], 1.0 / mu)
+
+    def test_B_shape(self):
+        """B matrix has shape (6, 9)."""
+        B = traction_from_strain(self.RHO, self.ALPHA, self.BETA)
+        assert B.shape == (6, 9)
+
+    def test_B_displacement_passthrough(self):
+        """Top-left 3×3 block of B is identity."""
+        B = traction_from_strain(self.RHO, self.ALPHA, self.BETA)
+        np.testing.assert_array_equal(B[:3, :3], np.eye(3))
+
+    def test_B_specific_entries(self):
+        """Verify specific B matrix entries against Hooke's law."""
+        B = traction_from_strain(self.RHO, self.ALPHA, self.BETA)
+
+        mu = self.RHO * self.BETA**2
+        lam = self.RHO * self.ALPHA**2 - 2 * mu
+
+        # σ_zz row (row 3): from (ε_zz, ε_xx, ε_yy) = cols (3, 4, 5)
+        # σ_zz = (λ+2μ)*ε_zz + λ*ε_xx + λ*ε_yy
+        np.testing.assert_allclose(B[3, 3], lam + 2 * mu)
+        np.testing.assert_allclose(B[3, 4], lam)
+        np.testing.assert_allclose(B[3, 5], lam)
+
+        # σ_xz row (row 4): from 2ε_zx = col 8
+        # σ_xz = μ * 2ε_zx
+        np.testing.assert_allclose(B[4, 8], mu)
+
+        # σ_yz row (row 5): from 2ε_zy = col 7
+        # σ_yz = μ * 2ε_zy
+        np.testing.assert_allclose(B[5, 7], mu)
+
+    def test_B_zero_displacement_stress_coupling(self):
+        """B has no coupling from strain to displacement."""
+        B = traction_from_strain(self.RHO, self.ALPHA, self.BETA)
+        # Displacement rows (:3) have zero in strain columns (3:)
+        np.testing.assert_array_equal(B[:3, 3:], 0.0)
+        # Stress rows (3:) have zero in displacement columns (:3)
+        np.testing.assert_array_equal(B[3:, :3], 0.0)
+
+
+# ===== Phase 6: 9×9 Green's function =====
+
+
+class TestGreens9x9:
+    """Tests for the 9×9 displacement-strain Green's function."""
+
+    def test_9x9_finite(self, model_4layer):
+        """9×9 Green's function produces finite values."""
+        omega = 5.0 + 0.1j
+        kx = np.array([1.0, 2.0, 0.5, -1.0])
+        ky = np.array([0.0, 1.0, 2.0, -1.0])
+        G9 = layered_greens_9x9(
+            model_4layer, omega, kx, ky, source_iface=1, receiver_iface=1
+        )
+        assert G9.shape == (4, 9, 9)
+        assert np.all(np.isfinite(G9))
+
+    def test_9x9_shape_2d(self, model_3layer):
+        """9×9 works on a 2D grid."""
+        omega = 5.0 + 0.1j
+        kx_1d = np.linspace(-3, 3, 5)
+        ky_1d = np.linspace(-3, 3, 5)
+        kx, ky = np.meshgrid(kx_1d, ky_1d)
+        G9 = layered_greens_9x9(
+            model_3layer, omega, kx, ky, source_iface=1, receiver_iface=0
+        )
+        assert G9.shape == (5, 5, 9, 9)
+        assert np.all(np.isfinite(G9))
+
+    def test_9x9_displacement_block(self, model_4layer):
+        """Top-left 3×3 of G_9x9 equals top-left 3×3 of G_6x6."""
+        omega = 5.0 + 0.1j
+        kx = np.array([1.0, 3.0, 5.0])
+        ky = np.array([0.5, 1.0, 2.0])
+        G6 = layered_greens_6x6(
+            model_4layer, omega, kx, ky, source_iface=1, receiver_iface=1
+        )
+        G9 = layered_greens_9x9(
+            model_4layer, omega, kx, ky, source_iface=1, receiver_iface=1
+        )
+
+        # G_9x9 = A @ G_6x6 @ B. The top-left 3×3 of A is I, and the
+        # top-left 3×3 of B is I, but B also has displacement→stress
+        # coupling in the traction rows. The displacement output block
+        # (rows :3) comes from A[:3,:] @ G6 @ B = I @ G6 @ B.
+        # For the displacement input block (cols :3), B[:3, :3] = I and
+        # B[3:, :3] = 0, so G9[:3, :3] = G6[:3, :3].
+        np.testing.assert_allclose(G9[:, :3, :3], G6[:, :3, :3], rtol=1e-12)
+
+    def test_9x9_sandwich_identity(self, model_4layer):
+        """G_9x9 == A @ G_6x6 @ B exactly."""
+        omega = 5.0 + 0.1j
+        kx = np.array([1.0, 3.0])
+        ky = np.array([0.5, 2.0])
+
+        G6 = layered_greens_6x6(
+            model_4layer, omega, kx, ky, source_iface=1, receiver_iface=2
+        )
+        G9 = layered_greens_9x9(
+            model_4layer, omega, kx, ky, source_iface=1, receiver_iface=2
+        )
+
+        rho_r, alpha_r, beta_r = _interface_elastic_properties(model_4layer, 2)
+        A = strain_from_displacement_traction(kx, ky, rho_r, alpha_r, beta_r)
+        rho_s, alpha_s, beta_s = _interface_elastic_properties(model_4layer, 1)
+        B = traction_from_strain(rho_s, alpha_s, beta_s)
+
+        G9_expected = np.einsum("...ij,...jk,kl->...il", A, G6, B)
+        np.testing.assert_allclose(G9, G9_expected, rtol=1e-12)
