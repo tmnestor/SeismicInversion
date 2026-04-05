@@ -30,11 +30,16 @@ def make_omega(nw: int) -> torch.Tensor:
 
 def _timeit(fn, n_runs=3) -> float:
     fn()
-    return np.median([(time.perf_counter(), fn(), time.perf_counter())
-                       for _ in range(n_runs)],
-                      axis=0)[2] - np.median(
-        [(time.perf_counter(), fn(), time.perf_counter())
-         for _ in range(n_runs)], axis=0)[0]
+    return (
+        np.median(
+            [(time.perf_counter(), fn(), time.perf_counter()) for _ in range(n_runs)],
+            axis=0,
+        )[2]
+        - np.median(
+            [(time.perf_counter(), fn(), time.perf_counter()) for _ in range(n_runs)],
+            axis=0,
+        )[0]
+    )
 
 
 def timeit(fn, n_runs=3) -> float:
@@ -53,7 +58,10 @@ def validate_jacrev():
     tensors = model_to_tensors(model, requires_grad=True)
     omega = make_omega(16)
     params = _pack_params(
-        tensors["alpha"], tensors["beta"], tensors["rho"], tensors["thickness"],
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
     )
 
     for label, refl_fn, jac_fn in [
@@ -62,21 +70,34 @@ def validate_jacrev():
     ]:
         # Reference: autograd.functional.jacobian
         J_ref = jac_fn(
-            tensors["alpha"], tensors["beta"], tensors["rho"],
-            tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-            0.2, omega,
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
+            tensors["thickness"],
+            tensors["Q_alpha"],
+            tensors["Q_beta"],
+            0.2,
+            omega,
         ).detach()
 
         # torch.func.jacrev
         def forward(p_vec):
             a, b, r, h = _unpack_params(
-                p_vec, tensors["alpha"], tensors["beta"],
-                tensors["rho"], tensors["thickness"],
+                p_vec,
+                tensors["alpha"],
+                tensors["beta"],
+                tensors["rho"],
+                tensors["thickness"],
             )
             return refl_fn(
-                a, b, r, h,
-                tensors["Q_alpha"], tensors["Q_beta"],
-                0.2, omega,
+                a,
+                b,
+                r,
+                h,
+                tensors["Q_alpha"],
+                tensors["Q_beta"],
+                0.2,
+                omega,
             )
 
         J_real = torch.func.jacrev(lambda p: forward(p).real)(params)
@@ -85,9 +106,14 @@ def validate_jacrev():
 
         diff = torch.max(torch.abs(J_ref - J_func)).item()
         rel_mask = torch.abs(J_ref) > 1e-15
-        rel_err = torch.max(
-            torch.abs(J_ref[rel_mask] - J_func[rel_mask]) / torch.abs(J_ref[rel_mask])
-        ).item() if rel_mask.any() else 0.0
+        rel_err = (
+            torch.max(
+                torch.abs(J_ref[rel_mask] - J_func[rel_mask])
+                / torch.abs(J_ref[rel_mask])
+            ).item()
+            if rel_mask.any()
+            else 0.0
+        )
 
         print(f"  {label}: max|diff|={diff:.2e}, max rel err={rel_err:.2e}")
 
@@ -97,21 +123,30 @@ def bench_hessian_methods():
     model = default_ocean_crust_model()
     tensors = model_to_tensors(model, requires_grad=True)
 
-    print(f"\n  {'nfreq':>8}  {'K old':>8}  {'G old':>8}  "
-          f"{'K jacrev':>8}  {'G jacrev':>8}  "
-          f"{'K func.H':>8}  {'G func.H':>8}")
-    print(f"  {'':>8}  {'(ms)':>8}  {'(ms)':>8}  "
-          f"{'(ms)':>8}  {'(ms)':>8}  "
-          f"{'(ms)':>8}  {'(ms)':>8}")
+    print(
+        f"\n  {'nfreq':>8}  {'K old':>8}  {'G old':>8}  "
+        f"{'K jacrev':>8}  {'G jacrev':>8}  "
+        f"{'K func.H':>8}  {'G func.H':>8}"
+    )
+    print(
+        f"  {'':>8}  {'(ms)':>8}  {'(ms)':>8}  "
+        f"{'(ms)':>8}  {'(ms)':>8}  "
+        f"{'(ms)':>8}  {'(ms)':>8}"
+    )
 
     for nw in [4, 8, 16, 32]:
         omega = make_omega(nw)
         nfreq = nw - 1
 
         args = (
-            tensors["alpha"], tensors["beta"], tensors["rho"],
-            tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-            0.2, omega,
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
+            tensors["thickness"],
+            tensors["Q_alpha"],
+            tensors["Q_beta"],
+            0.2,
+            omega,
         )
 
         # Old method: autograd.functional.hessian
@@ -120,22 +155,33 @@ def bench_hessian_methods():
 
         # jacrev-based Hessian: jacrev(jacrev(misfit))
         params = _pack_params(
-            tensors["alpha"], tensors["beta"], tensors["rho"],
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
             tensors["thickness"],
         )
 
         def make_misfit(refl_fn):
             def misfit(p_vec):
                 a, b, r, h = _unpack_params(
-                    p_vec, tensors["alpha"], tensors["beta"],
-                    tensors["rho"], tensors["thickness"],
+                    p_vec,
+                    tensors["alpha"],
+                    tensors["beta"],
+                    tensors["rho"],
+                    tensors["thickness"],
                 )
                 R = refl_fn(
-                    a, b, r, h,
-                    tensors["Q_alpha"], tensors["Q_beta"],
-                    0.2, omega,
+                    a,
+                    b,
+                    r,
+                    h,
+                    tensors["Q_alpha"],
+                    tensors["Q_beta"],
+                    0.2,
+                    omega,
                 )
-                return (R.real ** 2 + R.imag ** 2).sum()
+                return (R.real**2 + R.imag**2).sum()
+
             return misfit
 
         misfit_k = make_misfit(kennett_reflectivity_torch)
@@ -153,9 +199,11 @@ def bench_hessian_methods():
         tk_fh = timeit(lambda: torch.func.hessian(misfit_k)(params))
         tg_fh = timeit(lambda: torch.func.hessian(misfit_g)(params))
 
-        print(f"  {nfreq:>8}  {tk_old:>8.1f}  {tg_old:>8.1f}  "
-              f"{tk_jr:>8.1f}  {tg_jr:>8.1f}  "
-              f"{tk_fh:>8.1f}  {tg_fh:>8.1f}")
+        print(
+            f"  {nfreq:>8}  {tk_old:>8.1f}  {tg_old:>8.1f}  "
+            f"{tk_jr:>8.1f}  {tg_jr:>8.1f}  "
+            f"{tk_fh:>8.1f}  {tg_fh:>8.1f}"
+        )
 
 
 def bench_full_comparison():
@@ -166,13 +214,17 @@ def bench_full_comparison():
     # Production-scale: nfreq = 2047 (nw=2048)
     # But that's too slow for the old method. Use moderate sizes.
     print("\n  Full Jacobian comparison (all methods):")
-    print(f"\n  {'nfreq':>8}  {'Method':>30}  {'Kennett':>10}  {'GMM':>10}  {'Speedup':>8}")
+    print(
+        f"\n  {'nfreq':>8}  {'Method':>30}  {'Kennett':>10}  {'GMM':>10}  {'Speedup':>8}"
+    )
 
     for nw in [32, 128, 512]:
         omega = make_omega(nw)
         nfreq = nw - 1
         params = _pack_params(
-            tensors["alpha"], tensors["beta"], tensors["rho"],
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
             tensors["thickness"],
         )
 
@@ -181,19 +233,29 @@ def bench_full_comparison():
             ("torch.func.jacrev", "jacrev"),
             ("torch.func.jacfwd", "jacfwd"),
         ]:
+
             def make_jac_fn(refl_fn, method):
                 def forward(p_vec):
                     a, b, r, h = _unpack_params(
-                        p_vec, tensors["alpha"], tensors["beta"],
-                        tensors["rho"], tensors["thickness"],
+                        p_vec,
+                        tensors["alpha"],
+                        tensors["beta"],
+                        tensors["rho"],
+                        tensors["thickness"],
                     )
                     return refl_fn(
-                        a, b, r, h,
-                        tensors["Q_alpha"], tensors["Q_beta"],
-                        0.2, omega,
+                        a,
+                        b,
+                        r,
+                        h,
+                        tensors["Q_alpha"],
+                        tensors["Q_beta"],
+                        0.2,
+                        omega,
                     )
 
                 if method == "old":
+
                     def jac():
                         J_r = torch.autograd.functional.jacobian(
                             lambda p: forward(p).real, params
@@ -203,15 +265,18 @@ def bench_full_comparison():
                         )
                         return J_r + 1j * J_i
                 elif method == "jacrev":
+
                     def jac():
                         J_r = torch.func.jacrev(lambda p: forward(p).real)(params)
                         J_i = torch.func.jacrev(lambda p: forward(p).imag)(params)
                         return J_r + 1j * J_i
                 elif method == "jacfwd":
+
                     def jac():
                         J_r = torch.func.jacfwd(lambda p: forward(p).real)(params)
                         J_i = torch.func.jacfwd(lambda p: forward(p).imag)(params)
                         return J_r + 1j * J_i
+
                 return jac
 
             jac_k = make_jac_fn(kennett_reflectivity_torch, compute_jac)
@@ -222,7 +287,9 @@ def bench_full_comparison():
             tg = timeit(jac_g, n_runs=n_runs)
             speedup = tk / tg
 
-            print(f"  {nfreq:>8}  {method_name:>30}  {tk:>9.0f}ms  {tg:>9.0f}ms  {speedup:>7.2f}x")
+            print(
+                f"  {nfreq:>8}  {method_name:>30}  {tk:>9.0f}ms  {tg:>9.0f}ms  {speedup:>7.2f}x"
+            )
 
         print()
 

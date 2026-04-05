@@ -35,9 +35,14 @@ def make_omega(nw: int) -> torch.Tensor:
 def bench_forward(tensors, omega, p=0.2, n_runs=5):
     """Benchmark forward pass."""
     args = (
-        tensors["alpha"], tensors["beta"], tensors["rho"],
-        tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-        p, omega,
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
+        tensors["Q_alpha"],
+        tensors["Q_beta"],
+        p,
+        omega,
     )
 
     # Warmup
@@ -62,9 +67,14 @@ def bench_forward(tensors, omega, p=0.2, n_runs=5):
 def bench_jacobian(tensors, omega, p=0.2, n_runs=3):
     """Benchmark Jacobian computation."""
     args = (
-        tensors["alpha"], tensors["beta"], tensors["rho"],
-        tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-        p, omega,
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
+        tensors["Q_alpha"],
+        tensors["Q_beta"],
+        p,
+        omega,
     )
 
     # Warmup
@@ -89,9 +99,14 @@ def bench_jacobian(tensors, omega, p=0.2, n_runs=3):
 def bench_hessian(tensors, omega, p=0.2, n_runs=3):
     """Benchmark Hessian computation."""
     args = (
-        tensors["alpha"], tensors["beta"], tensors["rho"],
-        tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-        p, omega,
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
+        tensors["Q_alpha"],
+        tensors["Q_beta"],
+        p,
+        omega,
     )
 
     # Warmup
@@ -129,39 +144,52 @@ def main():
     for nw in [16, 32, 64, 128, 256, 512, 1024]:
         omega = make_omega(nw)
         tk, tg = bench_forward(tensors, omega)
-        ratio = tg / tk if tk > 0 else float('inf')
+        ratio = tg / tk if tk > 0 else float("inf")
         print(f"{nw - 1:>8}  {tk * 1000:>14.2f}  {tg * 1000:>14.2f}  {ratio:>8.2f}x")
     print()
 
     # --- Jacobian ---
     print("--- Jacobian (median of 3 runs) ---")
-    print(f"{'nfreq':>8}  {'Kennett (ms)':>14}  {'GMM (ms)':>14}  {'Ratio':>8}  {'Max |diff|':>12}")
+    print(
+        f"{'nfreq':>8}  {'Kennett (ms)':>14}  {'GMM (ms)':>14}  {'Ratio':>8}  {'Max |diff|':>12}"
+    )
     for nw in [8, 16, 32, 64, 128]:
         omega = make_omega(nw)
         tk, tg, J_k, J_g = bench_jacobian(tensors, omega)
         diff = torch.max(torch.abs(J_k - J_g)).item()
-        ratio = tg / tk if tk > 0 else float('inf')
-        print(f"{nw - 1:>8}  {tk * 1000:>14.2f}  {tg * 1000:>14.2f}  {ratio:>8.2f}x  {diff:>12.2e}")
+        ratio = tg / tk if tk > 0 else float("inf")
+        print(
+            f"{nw - 1:>8}  {tk * 1000:>14.2f}  {tg * 1000:>14.2f}  {ratio:>8.2f}x  {diff:>12.2e}"
+        )
     print()
 
     # --- Hessian ---
     print("--- Hessian (median of 3 runs) ---")
-    print(f"{'nfreq':>8}  {'Kennett (ms)':>14}  {'GMM (ms)':>14}  {'Ratio':>8}  {'Max |diff|':>12}")
+    print(
+        f"{'nfreq':>8}  {'Kennett (ms)':>14}  {'GMM (ms)':>14}  {'Ratio':>8}  {'Max |diff|':>12}"
+    )
     for nw in [4, 8, 16, 32]:
         omega = make_omega(nw)
         tk, tg, H_k, H_g = bench_hessian(tensors, omega)
         diff = torch.max(torch.abs(H_k - H_g)).item()
-        ratio = tg / tk if tk > 0 else float('inf')
-        print(f"{nw - 1:>8}  {tk * 1000:>14.2f}  {tg * 1000:>14.2f}  {ratio:>8.2f}x  {diff:>12.2e}")
+        ratio = tg / tk if tk > 0 else float("inf")
+        print(
+            f"{nw - 1:>8}  {tk * 1000:>14.2f}  {tg * 1000:>14.2f}  {ratio:>8.2f}x  {diff:>12.2e}"
+        )
     print()
 
     # --- Autograd graph analysis ---
     print("--- Autograd Graph Depth Analysis ---")
     omega_small = make_omega(8)
     args = (
-        tensors["alpha"], tensors["beta"], tensors["rho"],
-        tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-        0.2, omega_small,
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
+        tensors["Q_alpha"],
+        tensors["Q_beta"],
+        0.2,
+        omega_small,
     )
 
     # Count grad_fn nodes for Kennett
@@ -177,18 +205,27 @@ def main():
 
     # --- Memory analysis ---
     print("--- Tensor allocation in forward pass ---")
-    for label, fn in [("Kennett", kennett_reflectivity_torch), ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
         omega_mem = make_omega(256)
         torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
 
         # Count tensors before and after
         import gc
+
         gc.collect()
         before = len([obj for obj in gc.get_objects() if isinstance(obj, torch.Tensor)])
         R = fn(
-            tensors["alpha"], tensors["beta"], tensors["rho"],
-            tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-            0.2, omega_mem,
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
+            tensors["thickness"],
+            tensors["Q_alpha"],
+            tensors["Q_beta"],
+            0.2,
+            omega_mem,
         )
         after = len([obj for obj in gc.get_objects() if isinstance(obj, torch.Tensor)])
         print(f"{label}: ~{after - before} new tensors created during forward pass")

@@ -258,6 +258,67 @@ The inversion operates in **log-parameter space**
 improve conditioning.  The ocean layer is held fixed; the half-space
 thickness is excluded from the parameter vector.
 
+## Implicit Differentiation Through a Linear Solve
+
+The Global Matrix Method reduces the forward problem to a single linear
+system **G x = b**, where G is the assembled global matrix, b encodes
+the source, and x contains the displacement-stress coefficients at
+every interface.  Both G and b depend on the model parameters
+θ = (α, β, ρ, h).
+
+### Jacobian (first derivative)
+
+Differentiate G x = b with respect to a model parameter θ:
+
+```
+G (dx/dθ) = db/dθ − (dG/dθ) x
+```
+
+This is a linear system with the **same coefficient matrix G** that was
+already LU-factored during the forward solve.  The Jacobian column
+dx/dθ costs one back-substitution — not a new factorisation.
+
+### Hessian (second derivative)
+
+Differentiate again with respect to a second parameter φ:
+
+```
+G (d²x/dθdφ) = d²b/dθdφ − (d²G/dθdφ) x
+               − (dG/dθ)(dx/dφ) − (dG/dφ)(dx/dθ)
+```
+
+This is again a linear system with the **same G**.  The right-hand side
+requires only quantities already computed: the first derivatives dx/dθ
+and dx/dφ (from the Jacobian step), the solution x (from the forward
+solve), and the second derivatives of G and b with respect to the model
+parameters (assembled analytically from the layer matrices).
+
+For the diagonal Hessian element (φ = θ) this simplifies to:
+
+```
+G (d²x/dθ²) = d²b/dθ² − (d²G/dθ²) x − 2 (dG/dθ)(dx/dθ)
+```
+
+### Cost summary
+
+| Quantity | Kennett recursion | Global Matrix Method |
+|----------|-------------------|----------------------|
+| Forward x | Deep recursive sweep | LU factorise G, solve |
+| Jacobian dx/dθ | Backprop through full recursion graph | One back-substitution per θ |
+| Hessian d²x/dθdφ | Backprop through the Jacobian graph | One back-substitution per (θ,φ) pair |
+
+The Hessian is where implicit differentiation pays off most: the
+Kennett method requires AD to differentiate *through* the already
+expensive Jacobian computation, doubling the graph depth, while the
+Global Matrix Method reuses the same LU factorisation for every
+derivative order.  Benchmarks in `GlobalMatrix/investigate_ad.py` show
+a ~1.7× speedup for the Hessian, compared to ~1.2× for the Jacobian.
+
+In PyTorch, `torch.linalg.solve` implements implicit differentiation
+in its backward pass automatically — `torch.func.hessian` applies the
+rule twice through the autograd graph without the user writing any
+derivative formulae.
+
 ## Earth Model
 
 The default 5-layer ocean-crust model from the original Fortran code:

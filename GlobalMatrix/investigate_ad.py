@@ -109,18 +109,25 @@ def analyze_jacobian_method(tensors, omega):
 
 def profile_backward_passes(tensors, omega, p=0.2, n_runs=10):
     """Time individual forward + backward passes for GMM vs Kennett."""
-    for label, fn in [("Kennett", kennett_reflectivity_torch),
-                      ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
         times_fwd = []
         times_bwd = []
         for _ in range(n_runs):
             params = _pack_params(
-                tensors["alpha"], tensors["beta"], tensors["rho"],
+                tensors["alpha"],
+                tensors["beta"],
+                tensors["rho"],
                 tensors["thickness"],
             ).requires_grad_(True)
             a, b, r, h = _unpack_params(
-                params, tensors["alpha"], tensors["beta"],
-                tensors["rho"], tensors["thickness"],
+                params,
+                tensors["alpha"],
+                tensors["beta"],
+                tensors["rho"],
+                tensors["thickness"],
             )
 
             t0 = time.perf_counter()
@@ -135,22 +142,31 @@ def profile_backward_passes(tensors, omega, p=0.2, n_runs=10):
 
         fwd_ms = np.median(times_fwd) * 1000
         bwd_ms = np.median(times_bwd) * 1000
-        print(f"  {label:8s}: forward={fwd_ms:.3f}ms, "
-              f"single backward={bwd_ms:.3f}ms, "
-              f"backward/forward={bwd_ms / fwd_ms:.1f}x")
+        print(
+            f"  {label:8s}: forward={fwd_ms:.3f}ms, "
+            f"single backward={bwd_ms:.3f}ms, "
+            f"backward/forward={bwd_ms / fwd_ms:.1f}x"
+        )
 
 
 def profile_forward_graph(tensors, omega, p=0.2):
     """Analyze the forward computation graph for both methods."""
-    for label, fn in [("Kennett", kennett_reflectivity_torch),
-                      ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
         params = _pack_params(
-            tensors["alpha"], tensors["beta"], tensors["rho"],
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
             tensors["thickness"],
         ).requires_grad_(True)
         a, b, r, h = _unpack_params(
-            params, tensors["alpha"], tensors["beta"],
-            tensors["rho"], tensors["thickness"],
+            params,
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
+            tensors["thickness"],
         )
         R = fn(a, b, r, h, tensors["Q_alpha"], tensors["Q_beta"], p, omega)
 
@@ -168,18 +184,27 @@ def profile_forward_graph(tensors, omega, p=0.2):
 
 def scaling_analysis(tensors, p=0.2):
     """Show how Jacobian and Hessian time scales with nfreq."""
-    print(f"\n  {'nfreq':>8}  {'K fwd':>8}  {'K jac':>8}  {'G fwd':>8}  "
-          f"{'G jac':>8}  {'K bwd/fwd':>10}  {'G bwd/fwd':>10}  {'Speedup':>8}")
-    print(f"  {'':>8}  {'(ms)':>8}  {'(ms)':>8}  {'(ms)':>8}  "
-          f"{'(ms)':>8}  {'':>10}  {'':>10}  {'':>8}")
+    print(
+        f"\n  {'nfreq':>8}  {'K fwd':>8}  {'K jac':>8}  {'G fwd':>8}  "
+        f"{'G jac':>8}  {'K bwd/fwd':>10}  {'G bwd/fwd':>10}  {'Speedup':>8}"
+    )
+    print(
+        f"  {'':>8}  {'(ms)':>8}  {'(ms)':>8}  {'(ms)':>8}  "
+        f"{'(ms)':>8}  {'':>10}  {'':>10}  {'':>8}"
+    )
 
     for nw in [8, 16, 32, 64, 128, 256]:
         omega = make_omega(nw)
         nfreq = nw - 1
         args = (
-            tensors["alpha"], tensors["beta"], tensors["rho"],
-            tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-            p, omega,
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
+            tensors["thickness"],
+            tensors["Q_alpha"],
+            tensors["Q_beta"],
+            p,
+            omega,
         )
 
         # Warmup
@@ -187,8 +212,12 @@ def scaling_analysis(tensors, p=0.2):
         gmm_reflectivity_torch(*args)
 
         # Forward (median of 5)
-        tk_fwd = np.median([_timeit(lambda: kennett_reflectivity_torch(*args)) for _ in range(5)])
-        tg_fwd = np.median([_timeit(lambda: gmm_reflectivity_torch(*args)) for _ in range(5)])
+        tk_fwd = np.median(
+            [_timeit(lambda: kennett_reflectivity_torch(*args)) for _ in range(5)]
+        )
+        tg_fwd = np.median(
+            [_timeit(lambda: gmm_reflectivity_torch(*args)) for _ in range(5)]
+        )
 
         # Jacobian (median of 3)
         kennett_jacobian(*args)
@@ -202,8 +231,10 @@ def scaling_analysis(tensors, p=0.2):
         g_ratio = tg_jac / tg_fwd
         speedup = tk_jac / tg_jac
 
-        print(f"  {nfreq:>8}  {tk_fwd:>8.1f}  {tk_jac:>8.0f}  {tg_fwd:>8.1f}  "
-              f"{tg_jac:>8.0f}  {k_ratio:>10.0f}x  {g_ratio:>10.0f}x  {speedup:>7.2f}x")
+        print(
+            f"  {nfreq:>8}  {tk_fwd:>8.1f}  {tk_jac:>8.0f}  {tg_fwd:>8.1f}  "
+            f"{tg_jac:>8.0f}  {k_ratio:>10.0f}x  {g_ratio:>10.0f}x  {speedup:>7.2f}x"
+        )
 
 
 def _timeit(fn) -> float:
@@ -285,9 +316,14 @@ def main():
         omega = make_omega(nw)
         nfreq = nw - 1
         args = (
-            tensors["alpha"], tensors["beta"], tensors["rho"],
-            tensors["thickness"], tensors["Q_alpha"], tensors["Q_beta"],
-            0.2, omega,
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
+            tensors["thickness"],
+            tensors["Q_alpha"],
+            tensors["Q_beta"],
+            0.2,
+            omega,
         )
         # Warmup
         kennett_hessian(*args)

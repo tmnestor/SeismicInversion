@@ -42,27 +42,42 @@ def _timeit(fn, n_runs=3) -> float:
 
 def make_forward_fn(reflectivity_fn, tensors, p, omega):
     """Create a function from params -> R for use with torch.func."""
+
     def forward(params):
         a, b, r, h = _unpack_params(
-            params, tensors["alpha"], tensors["beta"],
-            tensors["rho"], tensors["thickness"],
+            params,
+            tensors["alpha"],
+            tensors["beta"],
+            tensors["rho"],
+            tensors["thickness"],
         )
         return reflectivity_fn(
-            a, b, r, h,
-            tensors["Q_alpha"], tensors["Q_beta"],
-            p, omega,
+            a,
+            b,
+            r,
+            h,
+            tensors["Q_alpha"],
+            tensors["Q_beta"],
+            p,
+            omega,
         )
+
     return forward
 
 
 def test_jacrev(tensors, omega, p=0.2):
     """Test torch.func.jacrev (vectorized reverse-mode)."""
     params = _pack_params(
-        tensors["alpha"], tensors["beta"], tensors["rho"], tensors["thickness"],
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
     )
 
-    for label, fn in [("Kennett", kennett_reflectivity_torch),
-                      ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
         forward = make_forward_fn(fn, tensors, p, omega)
 
         # Real and imag parts
@@ -74,12 +89,13 @@ def test_jacrev(tensors, omega, p=0.2):
 
         try:
             t = _timeit(
-                lambda: torch.func.jacrev(fwd_real)(params)
-                + 1j * torch.func.jacrev(fwd_imag)(params)
+                lambda: (
+                    torch.func.jacrev(fwd_real)(params)
+                    + 1j * torch.func.jacrev(fwd_imag)(params)
+                )
             )
-            J = (
-                torch.func.jacrev(fwd_real)(params)
-                + 1j * torch.func.jacrev(fwd_imag)(params)
+            J = torch.func.jacrev(fwd_real)(params) + 1j * torch.func.jacrev(fwd_imag)(
+                params
             )
             print(f"  {label:8s} jacrev:  {t:>8.1f} ms  shape={tuple(J.shape)}")
         except Exception as e:
@@ -89,11 +105,16 @@ def test_jacrev(tensors, omega, p=0.2):
 def test_jacfwd(tensors, omega, p=0.2):
     """Test torch.func.jacfwd (forward-mode AD)."""
     params = _pack_params(
-        tensors["alpha"], tensors["beta"], tensors["rho"], tensors["thickness"],
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
     )
 
-    for label, fn in [("Kennett", kennett_reflectivity_torch),
-                      ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
         forward = make_forward_fn(fn, tensors, p, omega)
 
         def fwd_real(p_vec):
@@ -104,12 +125,13 @@ def test_jacfwd(tensors, omega, p=0.2):
 
         try:
             t = _timeit(
-                lambda: torch.func.jacfwd(fwd_real)(params)
-                + 1j * torch.func.jacfwd(fwd_imag)(params)
+                lambda: (
+                    torch.func.jacfwd(fwd_real)(params)
+                    + 1j * torch.func.jacfwd(fwd_imag)(params)
+                )
             )
-            J = (
-                torch.func.jacfwd(fwd_real)(params)
-                + 1j * torch.func.jacfwd(fwd_imag)(params)
+            J = torch.func.jacfwd(fwd_real)(params) + 1j * torch.func.jacfwd(fwd_imag)(
+                params
             )
             print(f"  {label:8s} jacfwd:  {t:>8.1f} ms  shape={tuple(J.shape)}")
         except Exception as e:
@@ -119,11 +141,16 @@ def test_jacfwd(tensors, omega, p=0.2):
 def test_old_jacobian(tensors, omega, p=0.2):
     """Baseline: torch.autograd.functional.jacobian."""
     params = _pack_params(
-        tensors["alpha"], tensors["beta"], tensors["rho"], tensors["thickness"],
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
     )
 
-    for label, fn in [("Kennett", kennett_reflectivity_torch),
-                      ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
         forward = make_forward_fn(fn, tensors, p, omega)
 
         def fwd_real(p_vec):
@@ -133,8 +160,10 @@ def test_old_jacobian(tensors, omega, p=0.2):
             return forward(p_vec).imag
 
         t = _timeit(
-            lambda: torch.autograd.functional.jacobian(fwd_real, params)
-            + 1j * torch.autograd.functional.jacobian(fwd_imag, params)
+            lambda: (
+                torch.autograd.functional.jacobian(fwd_real, params)
+                + 1j * torch.autograd.functional.jacobian(fwd_imag, params)
+            )
         )
         print(f"  {label:8s} autograd.functional.jacobian: {t:>8.1f} ms")
 
@@ -142,22 +171,35 @@ def test_old_jacobian(tensors, omega, p=0.2):
 def test_vmap_jacrev(tensors, omega, p=0.2):
     """Test vmap + jacrev (vectorized reverse-mode over frequencies)."""
     params = _pack_params(
-        tensors["alpha"], tensors["beta"], tensors["rho"], tensors["thickness"],
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
     )
 
     # Can we vmap over frequencies? Each freq is an independent solve.
-    for label, fn in [("Kennett", kennett_reflectivity_torch),
-                      ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
         # Create per-frequency function
         def per_freq_forward(params, w):
             a, b, r, h = _unpack_params(
-                params, tensors["alpha"], tensors["beta"],
-                tensors["rho"], tensors["thickness"],
+                params,
+                tensors["alpha"],
+                tensors["beta"],
+                tensors["rho"],
+                tensors["thickness"],
             )
             R = fn(
-                a, b, r, h,
-                tensors["Q_alpha"], tensors["Q_beta"],
-                p, w.unsqueeze(0),
+                a,
+                b,
+                r,
+                h,
+                tensors["Q_alpha"],
+                tensors["Q_beta"],
+                p,
+                w.unsqueeze(0),
             )
             return R[0]  # scalar complex
 
@@ -186,20 +228,34 @@ def test_vmap_jacrev(tensors, omega, p=0.2):
 def test_vmap_jacfwd(tensors, omega, p=0.2):
     """Test vmap + jacfwd (vectorized forward-mode over frequencies)."""
     params = _pack_params(
-        tensors["alpha"], tensors["beta"], tensors["rho"], tensors["thickness"],
+        tensors["alpha"],
+        tensors["beta"],
+        tensors["rho"],
+        tensors["thickness"],
     )
 
-    for label, fn in [("Kennett", kennett_reflectivity_torch),
-                      ("GMM", gmm_reflectivity_torch)]:
+    for label, fn in [
+        ("Kennett", kennett_reflectivity_torch),
+        ("GMM", gmm_reflectivity_torch),
+    ]:
+
         def per_freq_forward(params, w):
             a, b, r, h = _unpack_params(
-                params, tensors["alpha"], tensors["beta"],
-                tensors["rho"], tensors["thickness"],
+                params,
+                tensors["alpha"],
+                tensors["beta"],
+                tensors["rho"],
+                tensors["thickness"],
             )
             R = fn(
-                a, b, r, h,
-                tensors["Q_alpha"], tensors["Q_beta"],
-                p, w.unsqueeze(0),
+                a,
+                b,
+                r,
+                h,
+                tensors["Q_alpha"],
+                tensors["Q_beta"],
+                p,
+                w.unsqueeze(0),
             )
             return R[0]
 
@@ -210,6 +266,7 @@ def test_vmap_jacfwd(tensors, omega, p=0.2):
             return per_freq_forward(params, w).imag
 
         try:
+
             def batched_jac(params):
                 jf_r = torch.func.jacfwd(per_freq_real, argnums=0)
                 jf_i = torch.func.jacfwd(per_freq_imag, argnums=0)
