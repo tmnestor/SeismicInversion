@@ -1904,6 +1904,376 @@ def solve_slab_foldy_lax_freq(
 
 
 # ---------------------------------------------------------------------------
+# Heterogeneous-contrast path: propagator-only FFT kernels + per-cube T
+# ---------------------------------------------------------------------------
+#
+# The FFT acceleration only requires translation invariance of the Green's
+# function ``G``.  The local T-operator is block-diagonal per cube and can
+# be applied in real space before the convolution, decoupling the FFT
+# kernel from spatially varying contrasts.  The code below mirrors the
+# uniform-contrast path but returns propagator-only kernels (``+P_9x9(r)``
+# without the ``-P @ T_loc`` contraction) and layers in a per-cube T-apply
+# step in the matvec.
+
+
+def build_T_loc_per_cube_freq(
+    a: float,
+    ref: ReferenceMedium,
+    contrasts_per_cube: list[MaterialContrast],
+    omegas: NDArray[np.complexfloating],
+) -> NDArray[np.complexfloating]:
+    """Frequency-batched per-cube local 9×9 T-matrix stack.
+
+    Loops over cubes and frequencies, calling the existing Rayleigh
+    sub-cell machinery for each ``(cube, ω)`` pair.  The returned tensor
+    indexes as ``out[f, n]`` where ``n`` is the cube index in the same
+    order as ``contrasts_per_cube``.
+
+    Args:
+        a: Cube half-width.
+        ref: Background medium.
+        contrasts_per_cube: Per-cube material contrasts, length ``nC``.
+        omegas: Complex angular frequencies, shape (F,).
+
+    Returns:
+        Stack of per-cube local T-matrices, shape (F, nC, 9, 9), complex.
+    """
+    _validate_omegas(omegas)
+    if len(contrasts_per_cube) == 0:
+        msg = "contrasts_per_cube must contain at least one MaterialContrast"
+        raise ValueError(msg)
+    n_freq = omegas.shape[0]
+    n_cubes = len(contrasts_per_cube)
+    out = np.empty((n_freq, n_cubes, 9, 9), dtype=complex)
+    for f_idx, om in enumerate(omegas):
+        for n, contrast in enumerate(contrasts_per_cube):
+            rayleigh = compute_cube_tmatrix(om, a, ref, contrast)
+            out[f_idx, n] = _sub_cell_tmatrix_9x9(rayleigh, om, a)
+    return out
+
+
+def build_propagator_fft_kernel_freq(
+    n_sub: int,
+    a_sub: float,
+    omegas: NDArray[np.complexfloating],
+    ref: ReferenceMedium,
+    dz_cubes: int = 0,
+) -> NDArray[np.complexfloating]:
+    """Frequency-batched propagator-only FFT kernel (Δz fixed).
+
+    Builds ``FFT2(-P_9x9(r))`` on a circular ``(2·n_sub - 1)²`` embedding
+    at the fixed ``Δz = dz_cubes`` grid separation, without any ``T_loc``
+    contraction.  The minus sign is baked in so that the heterogeneous
+    matvec has the same ``result = W + kernel ⊛ (T·W)`` sign convention
+    as the uniform path.
+
+    Args:
+        n_sub: Grid size per edge.
+        a_sub: Cube half-width (m).
+        omegas: Complex angular frequencies, shape (F,).
+        ref: Background medium.
+        dz_cubes: Signed layer separation in grid units (0 for
+            intra-layer, ±1, ±2, ... for inter-layer).
+
+    Returns:
+        Propagator FFT kernel, shape ``(F, 9, 9, nP, nP)``, complex.
+    """
+    _validate_omegas(omegas)
+    dd = 2.0 * a_sub
+    nP = 2 * n_sub - 1
+    n_freq = omegas.shape[0]
+
+    r_vecs, ix_flat, iy_flat = _stencil_offsets(n_sub, dz=dz_cubes)
+    r_vecs[:, 0] *= dd
+    r_vecs[:, 1] *= dd
+    r_vecs[:, 2] *= dd
+
+    kernel = np.zeros((n_freq, 9, 9, nP, nP), dtype=complex)
+    for f_idx, om in enumerate(omegas):
+        P_batch = _propagator_block_9x9_batch(r_vecs, om, ref)  # (N, 9, 9)
+        # Bake the minus sign into the kernel so that the matvec sign
+        # convention matches the uniform-contrast path (Δψ = -P·T·ψ).
+        block_batch = -P_batch
+        kernel[f_idx, :, :, ix_flat, iy_flat] = block_batch
+
+    return np.fft.fft2(kernel, axes=(-2, -1))
+
+
+def build_interlayer_propagator_kernel_cache_freq(
+    n_sub: int,
+    a_sub: float,
+    omegas: NDArray[np.complexfloating],
+    ref: ReferenceMedium,
+    max_dz: int,
+) -> dict[int, NDArray[np.complexfloating]]:
+    """Frequency-batched cache of propagator-only inter-layer kernels.
+
+    Returns ``FFT2(-P_9x9(r))`` for ``|Δz| = 1..max_dz`` with z-reflection
+    symmetry exploited to halve the work.  The z-parity identity
+    ``P(-Δz)[i, j] = η_i η_j · P(+Δz)[i, j]`` is a pure propagator
+    property — unlike the uniform-contrast cache it requires **no**
+    assumption on ``T_loc`` because ``T_loc`` has been removed entirely
+    from this kernel builder.
+
+    Args:
+        n_sub: Grid size per edge.
+        a_sub: Cube half-width (m).
+        omegas: Complex angular frequencies, shape (F,).
+        ref: Background medium.
+        max_dz: Maximum ``|Δz|`` in grid units.
+
+    Returns:
+        Dict mapping signed ``Δz → (F, 9, 9, nP, nP)`` FFT kernel.
+    """
+    _validate_omegas(omegas)
+    cache: dict[int, NDArray[np.complexfloating]] = {}
+    sign_mask = _Z_PARITY_MASK_9x9[None, :, :, None, None]  # (1, 9, 9, 1, 1)
+
+    for dz in range(1, max_dz + 1):
+        kernel_pos = build_propagator_fft_kernel_freq(
+            n_sub, a_sub, omegas, ref, dz_cubes=dz
+        )
+        cache[dz] = kernel_pos
+        cache[-dz] = sign_mask * kernel_pos
+
+    return cache
+
+
+def _apply_T_per_cube_multi_het_freq(
+    W_layer: NDArray[np.complexfloating],
+    T_layer: NDArray[np.complexfloating],
+) -> NDArray[np.complexfloating]:
+    """Apply per-cube 9×9 T-matrices to a ``(F, M, 9, k)`` layer block.
+
+    Block-diagonal matmul: ``out[f, n, :, :] = T_layer[f, n] @ W[f, n, :, :]``
+    implemented as a single ``einsum``.
+
+    Args:
+        W_layer: Layer block, shape ``(F, M, 9, k)``.
+        T_layer: Per-cube T stack for this layer, shape ``(F, M, 9, 9)``.
+
+    Returns:
+        T-applied block, shape ``(F, M, 9, k)``.
+    """
+    return np.einsum("fmij,fmjk->fmik", T_layer, W_layer)
+
+
+def layered_matvec_multi_het_freq(
+    W_flat: NDArray[np.complexfloating],
+    decomp: LayerDecomposition,
+    T_per_cube_freq_by_layer: list[NDArray[np.complexfloating]],
+    intralayer_prop_kernels_freq: list[NDArray[np.complexfloating]],
+    interlayer_prop_kernels_freq: dict[int, NDArray[np.complexfloating]],
+    n_sub: int,
+) -> NDArray[np.complexfloating]:
+    """Heterogeneous-contrast frequency-batched multi-RHS matvec.
+
+    Computes ``(I − G·diag(T_n))·W`` for a ``(F, 9·N_total, k)`` block
+    with per-cube local T-matrices.  Applies T in real space first, then
+    the propagator-only FFT kernels.
+
+    Args:
+        W_flat: Input state, shape ``(F, 9·N_total, k)``, z-sorted order.
+        decomp: Layer decomposition metadata.
+        T_per_cube_freq_by_layer: Per-layer per-cube T stack.
+            ``T_per_cube_freq_by_layer[lz]`` has shape ``(F, M_lz, 9, 9)``
+            and indexes cubes in the same z-sorted order as ``decomp``.
+        intralayer_prop_kernels_freq: Per-layer propagator-only intra-layer
+            FFT kernels, each ``(F, 9, 9, nP, nP)``.
+        interlayer_prop_kernels_freq: Dict mapping signed Δz to
+            propagator-only FFT kernels, each ``(F, 9, 9, nP, nP)``.
+        n_sub: Grid size per edge.
+
+    Returns:
+        ``(F, 9·N_total, k)`` result in z-sorted order.
+    """
+    if W_flat.ndim != 3:
+        msg = f"W_flat must be 3D (F, 9*N, k); got ndim={W_flat.ndim}"
+        raise ValueError(msg)
+    n_freq, _, k_rhs = W_flat.shape
+    nP = 2 * n_sub - 1
+    result = W_flat.copy()
+
+    # First, apply per-cube T to each layer's block in real space and
+    # cache the T-applied layer blocks (shape ``(F, M_lz, 9, k)``).
+    T_layer_blocks: list[NDArray[np.complexfloating]] = []
+    for lz in range(decomp.n_layers):
+        s = decomp.layer_slices[lz]
+        M = int(decomp.layer_sizes[lz])
+        block = W_flat[:, 9 * s.start : 9 * s.stop, :].reshape(n_freq, M, 9, k_rhs)
+        T_layer = T_per_cube_freq_by_layer[lz]  # (F, M, 9, 9)
+        if T_layer.shape != (n_freq, M, 9, 9):
+            msg = (
+                f"T_per_cube_freq_by_layer[{lz}] shape {T_layer.shape} "
+                f"does not match expected {(n_freq, M, 9, 9)}"
+            )
+            raise ValueError(msg)
+        T_layer_blocks.append(_apply_T_per_cube_multi_het_freq(block, T_layer))
+
+    # Then convolve the T-applied blocks by the propagator-only FFT
+    # kernels, layer-by-layer.
+    for lr in range(decomp.n_layers):
+        sr = decomp.layer_slices[lr]
+        Mr = int(decomp.layer_sizes[lr])
+        grid_r = decomp.layer_grid_2d[lr]
+        accum = np.zeros((n_freq, Mr, 9, k_rhs), dtype=complex)
+
+        for ls in range(decomp.n_layers):
+            grid_s = decomp.layer_grid_2d[ls]
+            dz = int(decomp.z_indices[lr] - decomp.z_indices[ls])
+            if dz == 0:
+                kernel_freq = intralayer_prop_kernels_freq[ls]
+            else:
+                if dz not in interlayer_prop_kernels_freq:
+                    continue
+                kernel_freq = interlayer_prop_kernels_freq[dz]
+
+            accum += _apply_2d_fft_kernel_cross_multi_freq(
+                T_layer_blocks[ls], kernel_freq, grid_s, grid_r, nP
+            )
+
+        result[:, 9 * sr.start : 9 * sr.stop, :] += accum.reshape(n_freq, 9 * Mr, k_rhs)
+
+    return result
+
+
+def solve_slab_foldy_lax_freq_het(
+    M: int,
+    N_z: int,
+    a: float,
+    omegas: NDArray[np.complexfloating],
+    ref: ReferenceMedium,
+    contrasts_per_cube: list[MaterialContrast],
+    k_hat: NDArray | None = None,
+    wave_type: str = "S",
+    rtol: float = 1e-8,
+    max_iter: int = _BLOCK_GMRES_FREQ_DEFAULT_MAXITER,
+) -> tuple[
+    NDArray[np.complexfloating],
+    int,
+    NDArray[np.floating],
+]:
+    """Heterogeneous-contrast frequency-batched block Foldy-Lax solve.
+
+    Drop-in heterogeneous twin of :func:`solve_slab_foldy_lax_freq`: the
+    only change in the physics API is that ``contrast`` (one global
+    ``MaterialContrast``) is replaced by ``contrasts_per_cube`` (a list
+    of one ``MaterialContrast`` per cube).  The per-cube contrasts must
+    be provided in the same canonical order as the cube centres returned
+    by :func:`cluster_from_slab` — i.e. looping ``iz`` (outer), ``ix``,
+    ``iy`` (innermost).
+
+    The per-cube T-matrices are applied in real space inside the matvec
+    before the propagator-only FFT convolution, so that the FFT kernel
+    depends only on the translation-invariant background Green's
+    function.  This decouples the FFT acceleration from T-uniformity.
+
+    The composite T-matrix is accumulated per frequency via
+    ``T_comp = Σ_n T_n @ ψ_exc[n]`` — the direct generalisation of the
+    uniform-contrast accumulator ``Σ_n T_loc @ ψ_exc[n]``.
+
+    Args:
+        M: Lateral grid size.
+        N_z: Number of z-layers.
+        a: Cube half-width (m).
+        omegas: Complex angular frequencies, shape (F,).
+        ref: Background medium.
+        contrasts_per_cube: Length-``M·M·N_z`` list of per-cube
+            :class:`MaterialContrast` in :func:`cluster_from_slab` order.
+        k_hat: Incident unit direction (default z-hat).
+        wave_type: 'S' or 'P'.
+        rtol: Relative residual tolerance for block_gmres_freq.
+        max_iter: Max block Arnoldi iterations.
+
+    Returns:
+        ``(T_comp_freq, iters, rel_res_freq)`` with
+        ``T_comp_freq`` of shape ``(F, 9, 9)`` and ``rel_res_freq`` of
+        shape ``(F,)``.
+    """
+    _validate_omegas(omegas)
+    n_expected = M * M * N_z
+    if len(contrasts_per_cube) != n_expected:
+        msg = (
+            f"contrasts_per_cube has length {len(contrasts_per_cube)}, "
+            f"expected M·M·N_z = {M}·{M}·{N_z} = {n_expected}. "
+            "Provide one MaterialContrast per cube in cluster_from_slab "
+            "canonical order (iz outer, ix middle, iy inner)."
+        )
+        raise ValueError(msg)
+
+    geom = cluster_from_slab(M, N_z, a)
+    decomp = decompose_layers(geom)
+    nC = len(geom.centres)
+    dim = 9 * nC
+    n_freq = omegas.shape[0]
+
+    # Per-cube T stack in original cluster_from_slab order,
+    # shape (F, nC, 9, 9).
+    T_per_cube_freq = build_T_loc_per_cube_freq(a, ref, contrasts_per_cube, omegas)
+
+    # Re-sort per-cube T to z-sorted order and split per layer.
+    T_sorted = T_per_cube_freq[:, decomp.sort_order, :, :]
+    T_per_cube_by_layer: list[NDArray[np.complexfloating]] = []
+    for lz in range(decomp.n_layers):
+        s = decomp.layer_slices[lz]
+        T_per_cube_by_layer.append(T_sorted[:, s, :, :])
+
+    # Propagator-only FFT kernels: intra-layer shared across layers
+    # (free-space propagator is translation-invariant), inter-layer cache
+    # keyed by signed Δz.
+    shared_intralayer_freq = build_propagator_fft_kernel_freq(
+        M, a, omegas, ref, dz_cubes=0
+    )
+    intralayer_freq = [shared_intralayer_freq] * decomp.n_layers
+    max_dz = (
+        int(decomp.z_indices[-1] - decomp.z_indices[0]) if decomp.n_layers > 1 else 0
+    )
+    interlayer_freq = build_interlayer_propagator_kernel_cache_freq(
+        M, a, omegas, ref, max_dz
+    )
+
+    # Incident field in original ordering, then z-sort.
+    psi_inc_freq = _build_incident_field_coupled_freq(
+        geom.centres, omegas, ref, k_hat=k_hat, wave_type=wave_type
+    )  # (F, 9*N, 9)
+    psi_inc_sorted = np.empty_like(psi_inc_freq)
+    for f_idx in range(n_freq):
+        for col in range(9):
+            psi_inc_sorted[f_idx, :, col] = _reorder_flat(
+                psi_inc_freq[f_idx, :, col], decomp.sort_order, nC
+            )
+
+    def matvec_multi_freq(W: NDArray) -> NDArray:
+        return layered_matvec_multi_het_freq(
+            W,
+            decomp,
+            T_per_cube_by_layer,
+            intralayer_freq,
+            interlayer_freq,
+            M,
+        )
+
+    X_sorted, iters, rel_res_freq = block_gmres_freq(
+        matvec_multi_freq,
+        psi_inc_sorted,
+        x0=psi_inc_sorted.copy(),
+        rtol=rtol,
+        max_iter=max_iter,
+    )
+
+    # Composite T-matrix: Σ_n T_n @ ψ_exc[n].  Both the T stack and the
+    # solution are in z-sorted order, so accumulate directly on the
+    # sorted representation.
+    T_comp_freq = np.zeros((n_freq, 9, 9), dtype=complex)
+    # X_sorted has shape (F, 9·nC, 9).  Reshape to (F, nC, 9, 9), then
+    # contract with T_sorted (F, nC, 9, 9) by einsum over the cube axis.
+    psi_exc_sorted_blocks = X_sorted.reshape(n_freq, nC, 9, 9)
+    T_comp_freq = np.einsum("fnij,fnjk->fik", T_sorted, psi_exc_sorted_blocks)
+
+    return T_comp_freq, iters, rel_res_freq
+
+
+# ---------------------------------------------------------------------------
 # 5. Block-diagonal preconditioner
 # ---------------------------------------------------------------------------
 

@@ -1,0 +1,112 @@
+# At-scale heterogeneous-voxel τ-p demo configuration.
+#
+# A 20-layer oceanic crust: water + 3 sediments + 3 pillow basalts + 4
+# sheeted dykes + 8 gabbros + mantle half-space.  Each of the 18 finite
+# elastic layers (interfaces 1..18) carries a 32×32×1 lattice of
+# independently-sampled heterogeneous cubic voxels whose contrasts
+# follow a per-layer two-component Gaussian mixture (soft + hard).
+#
+# Units: km/s, g/cm³, km, GPa  (1 GPa ≡ (g/cm³)·(km/s)²)
+
+random_seed: 20260406
+
+model:
+  layers:
+    # Ocean
+    - {name: water,      alpha: 1.50, beta: 0.00, rho: 1.03, thickness: 4.500,
+       Q_alpha: 20000,   Q_beta: 10000000000.0}
+    # Sediments (3)
+    - {name: sediment_1, alpha: 1.80, beta: 0.40, rho: 1.80, thickness: 0.300,
+       Q_alpha: 200,     Q_beta: 100}
+    - {name: sediment_2, alpha: 2.10, beta: 0.70, rho: 2.00, thickness: 0.300,
+       Q_alpha: 200,     Q_beta: 100}
+    - {name: sediment_3, alpha: 2.40, beta: 1.00, rho: 2.20, thickness: 0.300,
+       Q_alpha: 200,     Q_beta: 100}
+    # Pillow basalts (3)
+    - {name: pillow_1,   alpha: 3.50, beta: 1.90, rho: 2.50, thickness: 0.500,
+       Q_alpha: 250,     Q_beta: 125}
+    - {name: pillow_2,   alpha: 4.00, beta: 2.20, rho: 2.60, thickness: 0.500,
+       Q_alpha: 250,     Q_beta: 125}
+    - {name: pillow_3,   alpha: 4.50, beta: 2.50, rho: 2.70, thickness: 0.500,
+       Q_alpha: 250,     Q_beta: 125}
+    # Sheeted dykes (4)
+    - {name: dyke_1,     alpha: 5.00, beta: 2.80, rho: 2.75, thickness: 0.500,
+       Q_alpha: 300,     Q_beta: 150}
+    - {name: dyke_2,     alpha: 5.30, beta: 2.95, rho: 2.80, thickness: 0.500,
+       Q_alpha: 300,     Q_beta: 150}
+    - {name: dyke_3,     alpha: 5.50, beta: 3.05, rho: 2.85, thickness: 0.500,
+       Q_alpha: 300,     Q_beta: 150}
+    - {name: dyke_4,     alpha: 5.70, beta: 3.15, rho: 2.88, thickness: 0.500,
+       Q_alpha: 300,     Q_beta: 150}
+    # Gabbro (8)
+    - {name: gabbro_1,   alpha: 6.50, beta: 3.60, rho: 2.90, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    - {name: gabbro_2,   alpha: 6.60, beta: 3.65, rho: 2.92, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    - {name: gabbro_3,   alpha: 6.70, beta: 3.70, rho: 2.94, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    - {name: gabbro_4,   alpha: 6.80, beta: 3.75, rho: 2.96, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    - {name: gabbro_5,   alpha: 6.90, beta: 3.80, rho: 2.97, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    - {name: gabbro_6,   alpha: 7.00, beta: 3.85, rho: 2.98, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    - {name: gabbro_7,   alpha: 7.10, beta: 3.90, rho: 2.99, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    - {name: gabbro_8,   alpha: 7.20, beta: 3.95, rho: 3.00, thickness: 0.400,
+       Q_alpha: 400,     Q_beta: 200}
+    # Mantle half-space
+    - {name: mantle,     alpha: 8.10, beta: 4.50, rho: 3.30, thickness: .inf,
+       Q_alpha: 500,     Q_beta: 250}
+
+voxels:
+  # GMM mean/std values are interpreted as **fractional** perturbations
+  # of the layer's background (λ, μ, ρ), e.g. mean=0.10 means a 10 %
+  # increase in that Lamé parameter relative to the layer reference.
+  # This is the only physically sensible interpretation across layers
+  # whose μ ranges from ~0.3 GPa (sediment) to ~46 GPa (gabbro).
+  M: 32           # 32×32 = 1024 voxels per layer
+  N_z: 1          # one z-slice of cubes per layer
+  a_km: 0.010     # cube half-width (km) — 10 m, space-filling
+  defaults:
+    p_soft: 0.15
+    hard:
+      Dlambda: {mean:  0.08, std: 0.02}
+      Dmu:     {mean:  0.10, std: 0.02}
+      Drho:    {mean:  0.04, std: 0.01}
+    soft:
+      Dlambda: {mean: -0.06, std: 0.02}
+      Dmu:     {mean: -0.08, std: 0.02}
+      Drho:    {mean: -0.05, std: 0.01}
+  # Per-interface overrides (1 = sediment_1, ..., 18 = gabbro_8).  The
+  # water layer (0) and the mantle half-space (19) never carry
+  # scatterers.  Sediments get a slightly larger softening tail; the
+  # last gabbro is biased almost entirely hard to highlight the
+  # contrast against the mantle.
+  overrides:
+    1:  {p_soft: 0.30, soft: {Dmu: {mean: -0.10, std: 0.03}}}
+    2:  {p_soft: 0.30, soft: {Dmu: {mean: -0.10, std: 0.03}}}
+    3:  {p_soft: 0.25, soft: {Dmu: {mean: -0.10, std: 0.03}}}
+    18: {p_soft: 0.05}
+
+frequency:
+  nw: 256                   # number of positive frequencies (excluding DC)
+  T_record: 32.0            # record length (s) → dω = 2π/T
+  damping: 0.1              # imaginary part of ω (rad/s)
+
+slowness:
+  p_min: 0.05               # s/km
+  p_max: 0.60               # s/km
+  n_p:   48
+
+block_gmres:
+  rtol: 1.0e-8
+  max_iter: 30
+
+output:
+  dir: GlobalMatrix/output/taup_scale_demo
+  npz_name: taup_scale_demo.npz
+  figures:
+    wiggle_total:     taup_wiggle_gather.pdf
+    wiggle_reference: taup_reference_wiggle_gather.pdf
+    r_omega_p:        r_omega_p_heatmap.pdf
