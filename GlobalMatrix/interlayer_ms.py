@@ -35,14 +35,17 @@ from .layered_greens import (
 __all__ = [
     "InterlayerMSResult",
     "InterlayerMSResult9x9",
+    "InterlayerMSResult9x9MultiP",
     "ScattererSlab",
     "ScattererSlab9x9",
+    "ScattererSlab9x9MultiP",
     "background_incident_field",
     "background_incident_field_9x9",
     "build_interlayer_greens_matrix",
     "build_interlayer_greens_matrix_9x9",
     "interlayer_ms_reflectivity",
     "interlayer_ms_reflectivity_9x9",
+    "interlayer_ms_reflectivity_9x9_multi_p",
     "scattered_reflectivity",
     "scattered_reflectivity_9x9",
     "solve_interlayer_foldy_lax",
@@ -837,4 +840,384 @@ def interlayer_ms_reflectivity_9x9(
         R_born=R_born,
         psi_exciting=psi_exciting,
         psi_incident=psi0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-slowness (slowness-coupled) 9×9 path
+# ---------------------------------------------------------------------------
+#
+# Architecture
+# ------------
+# The single-p path treats every (kx[s], ky[s]) sample as an independent
+# linear system: the scatterer T-matrix is a single (9, 9) per interface
+# and is *diagonal in slowness* (it never mixes p_in and p_out).  In a
+# laterally heterogeneous slab the inner Foldy-Lax solver naturally
+# produces a full ``(n_p_out, n_p_in, 9, 9)`` slowness-coupling block per
+# interface (one per ω); this multi-p path consumes those blocks.
+#
+# Operator structure (per ω):
+#
+#   * Inter-layer Green's function ``G_{ij}(p)``: the layered medium is
+#     translation-invariant in (x, y), so propagation between two
+#     scatterer interfaces conserves the horizontal slowness.  ``G`` is
+#     therefore *block-diagonal in p*.
+#   * Scatterer ``T_j[p_out, p_in]``: a heterogeneous scatterer mixes
+#     incident and scattered slownesses.  ``T`` is *full in (p_out, p_in)*
+#     for a fixed interface ``j`` and *block-diagonal in j*.
+#
+# Foldy-Lax fixed-point on the joint (interface × slowness × pol) state
+# vector ``ψ[i, p, k]`` of length ``N = N_z · n_p · 9``::
+#
+#     ψ_exc[i, p, k] = ψ_inc[i, p, k]
+#                    + Σ_{j ≠ i, l, p_in, m}
+#                          G_{ij}(p)[k, l] · n_j · T_j[p, p_in, l, m]
+#                          · ψ_exc[j, p_in, m]
+#
+# In matrix form ``(I − GT) ψ_exc = ψ_inc``.
+#
+# RHS columns
+# -----------
+# We want one reflection coefficient per *observation* slowness ``p_obs``.
+# The source is a unit ocean P-wave plane wave at slowness ``p_obs``;
+# inter-layer propagation conserves slowness, so the incident field at
+# every scatterer interface is non-zero **only at p = p_obs**.  Stacking
+# all ``n_p`` observations as independent RHS columns gives a
+# ``(N, n_p)`` block-RHS, solved in one ``np.linalg.solve`` call.
+#
+# Convention
+# ----------
+# Index ordering inside ``ψ`` is ``(i_iface, p, k)`` with ``k`` fastest
+# and ``p`` middle::
+#
+#     flat_idx = i_iface * (n_p * 9) + p * 9 + k
+#
+# This keeps each scatterer interface as a contiguous ``(n_p · 9,)`` slab
+# (good for Riccati per-interface bookkeeping) and each slowness as a
+# contiguous ``(9,)`` slot inside that slab (good for the per-cube
+# polarization basis).
+
+
+@dataclass
+class ScattererSlab9x9MultiP:
+    """9×9 scatterer slab with full slowness-coupled T-matrices.
+
+    Each scatterer interface carries a full ``(n_p, n_p, 9, 9)`` block
+    that maps incident slowness ``p_in`` to outgoing slowness ``p_out``
+    in the displacement-strain basis.  Use this class with
+    :func:`interlayer_ms_reflectivity_9x9_multi_p`.
+
+    Args:
+        model: Background stratified elastic model.
+        scatterer_ifaces: Interface indices containing scatterers,
+            in range ``[1, M]`` with ``M = n_layers - 2``.
+        tmatrices: Mapping ``iface → (n_p, n_p, 9, 9)`` slowness-coupled
+            T-block.  ``n_p`` must be the same for every interface and
+            must match the ``(kx, ky)`` sample count passed to the
+            top-level solver.
+        number_densities: Mapping ``iface → ρ_a`` (areal number density,
+            scatterers per unit area).
+    """
+
+    model: LayerModel
+    scatterer_ifaces: list[int]
+    tmatrices: dict[int, np.ndarray]
+    number_densities: dict[int, float]
+
+    def __post_init__(self) -> None:
+        """Validate the multi-p slab configuration."""
+        M = self.model.n_layers - 2
+        n_p_first: int | None = None
+        for idx in self.scatterer_ifaces:
+            if not (1 <= idx <= M):
+                msg = (
+                    f"Scatterer interface {idx} out of range [1, {M}] "
+                    f"for a model with {self.model.n_layers} layers"
+                )
+                raise ValueError(msg)
+            if idx not in self.tmatrices:
+                msg = f"Missing T-matrix for scatterer interface {idx}"
+                raise ValueError(msg)
+            T = self.tmatrices[idx]
+            if T.ndim != 4 or T.shape[2:] != (9, 9) or T.shape[0] != T.shape[1]:
+                msg = (
+                    f"T-matrix at interface {idx} has shape {T.shape}, "
+                    "expected (n_p, n_p, 9, 9)"
+                )
+                raise ValueError(msg)
+            if n_p_first is None:
+                n_p_first = T.shape[0]
+            elif T.shape[0] != n_p_first:
+                msg = (
+                    f"T-matrix at interface {idx} has n_p={T.shape[0]} "
+                    f"inconsistent with first iface n_p={n_p_first}"
+                )
+                raise ValueError(msg)
+            if idx not in self.number_densities:
+                msg = f"Missing number density for scatterer interface {idx}"
+                raise ValueError(msg)
+
+
+@dataclass
+class InterlayerMSResult9x9MultiP:
+    """Result of slowness-coupled 9×9 interlayer MS calculation.
+
+    Args:
+        R_background: Background reflectivity (no scatterers), shape
+            ``(n_p,)``.
+        R_total: Total reflectivity with interlayer MS and full
+            slowness coupling at each scatterer, shape ``(n_p,)``.
+            ``R_total[p_obs]`` is the upgoing-P reflection coefficient
+            at the ocean bottom for an incident plane wave at slowness
+            ``p_obs``.
+        R_born: Born (single-scattering) reflectivity, shape ``(n_p,)``.
+            Replaces the Foldy-Lax exciting field with the bare
+            incident field — same slowness coupling on the source side,
+            no inter-scatterer multiple scattering.
+        psi_exciting: Joint exciting-field tensor, shape
+            ``(N_z, n_p_obs, n_p_state, 9)``.  ``[i, p_obs, p, k]`` is
+            the excitation at scatterer ``i`` and slowness state ``p``
+            when the source illuminates from observation slowness
+            ``p_obs``.
+        psi_incident: Joint incident-field tensor, shape
+            ``(N_z, n_p_obs, n_p_state, 9)``.  Sparse: non-zero only
+            when ``p_obs == p_state``.
+    """
+
+    R_background: np.ndarray
+    R_total: np.ndarray
+    R_born: np.ndarray
+    psi_exciting: np.ndarray
+    psi_incident: np.ndarray
+
+
+def _build_foldy_lax_matrix_multi_p(
+    G_block_per_p: np.ndarray,
+    tmatrices: dict[int, np.ndarray],
+    number_densities: dict[int, float],
+    scatterer_ifaces: list[int],
+) -> np.ndarray:
+    """Assemble ``(I − GT)`` for the slowness-coupled Foldy-Lax system.
+
+    Args:
+        G_block_per_p: Per-slowness inter-layer Green's matrix from
+            :func:`build_interlayer_greens_matrix_9x9`, shape
+            ``(n_p, 9·N_z, 9·N_z)``.  Block-diagonal in slowness with
+            zero diagonal sub-blocks ``G_{ii}``.
+        tmatrices: Per-interface ``(n_p, n_p, 9, 9)`` slowness-coupled
+            T-blocks.
+        number_densities: Per-interface areal number density.
+        scatterer_ifaces: Interface indices in the same order used to
+            build ``G_block_per_p``.
+
+    Returns:
+        Dense ``(N, N)`` matrix with ``N = N_z · n_p · 9``, in the
+        ``(i_iface, p, k)`` flat ordering documented at the top of the
+        multi-p section.
+    """
+    n_p, three_NZ, _ = G_block_per_p.shape
+    N_z = len(scatterer_ifaces)
+    if three_NZ != 9 * N_z:
+        msg = (
+            f"G_block_per_p has shape {G_block_per_p.shape}, expected "
+            f"(n_p, {9 * N_z}, {9 * N_z})"
+        )
+        raise ValueError(msg)
+
+    N = N_z * n_p * 9
+    A = np.zeros((N_z, n_p, 9, N_z, n_p, 9), dtype=_CD)
+
+    # Identity diagonal: A[i, p, k, i, p, k] = 1
+    for i in range(N_z):
+        for p in range(n_p):
+            for k in range(9):
+                A[i, p, k, i, p, k] = 1.0
+
+    # Off-diagonal: A[i, p, k, j, p_in, k'] = -n_j · G_{ij}(p)[k, l]
+    #                                         · T_j[p, p_in, l, k']
+    for i, _iface_i in enumerate(scatterer_ifaces):
+        for j, iface_j in enumerate(scatterer_ifaces):
+            if i == j:
+                continue
+            n_j = number_densities[iface_j]
+            T_j = tmatrices[iface_j]  # (n_p, n_p, 9, 9)
+            G_ij_per_p = G_block_per_p[
+                :, 9 * i : 9 * (i + 1), 9 * j : 9 * (j + 1)
+            ]  # (n_p, 9, 9)
+            # block[p, p_in, k, k'] = -n_j · Σ_l G_ij(p)[k, l] · T_j[p, p_in, l, k']
+            block = -n_j * np.einsum(
+                "pkl,pPlq->pPkq",
+                G_ij_per_p,
+                T_j,
+            )
+            # Place into A[i, :, :, j, :, :]: indices (p, k, p_in, k')
+            # Need transpose: block has (p, p_in, k, k'), target has (p, k, p_in, k')
+            A[i, :, :, j, :, :] = block.transpose(0, 2, 1, 3)
+
+    return A.reshape(N, N)
+
+
+def interlayer_ms_reflectivity_9x9_multi_p(
+    slab: ScattererSlab9x9MultiP,
+    omega: complex,
+    kx: np.ndarray,
+    ky: np.ndarray,
+) -> InterlayerMSResult9x9MultiP:
+    """Reflectivity with full slowness-coupled interlayer MS.
+
+    Solves the joint Foldy-Lax system that couples *every* slowness
+    sample at *every* scatterer interface through the per-interface
+    ``(n_p, n_p, 9, 9)`` T-matrix, then extracts one reflection
+    coefficient per observation slowness from the ocean bottom.
+
+    Algorithm (per ω):
+        1. Build the per-slowness inter-layer Green's matrix
+           ``G[p, 9·N_z, 9·N_z]`` (reuses
+           :func:`build_interlayer_greens_matrix_9x9`).
+        2. Assemble the dense ``(N, N) = (N_z · n_p · 9, …)`` operator
+           ``A = I − GT`` via :func:`_build_foldy_lax_matrix_multi_p`.
+        3. Build the block RHS ``Ψ_inc[(i, p, k), p_obs] = δ_{p, p_obs}
+           · ψ_inc_iface[i, p_obs, k]``, where ``ψ_inc_iface`` is the
+           single-p background incident field for each ``p_obs``.
+        4. Solve ``A · Ψ_exc = Ψ_inc`` (one LU, ``n_p`` back-subs).
+        5. For each ``p_obs``, propagate the scattered moments at each
+           scatterer (``n_j Σ_{p_in} T_j[p_obs, p_in] · ψ_exc[j, p_in]``)
+           through ``G_{0, j}(p_obs)`` and extract the upgoing P
+           amplitude at the ocean bottom.
+
+    Args:
+        slab: Multi-p scatterer configuration.  All T-matrices share a
+            common ``n_p`` that must equal ``len(kx)``.
+        omega: Angular frequency (scalar, may be complex).
+        kx: Horizontal wavenumber x-component, shape ``(n_p,)``.
+        ky: Horizontal wavenumber y-component, shape ``(n_p,)``.
+
+    Returns:
+        :class:`InterlayerMSResult9x9MultiP` with ``R_total``,
+        ``R_background``, ``R_born`` each of shape ``(n_p,)``.
+    """
+    if kx.shape != ky.shape:
+        msg = f"kx shape {kx.shape} != ky shape {ky.shape}"
+        raise ValueError(msg)
+    if kx.ndim != 1:
+        msg = f"kx must be 1-D (n_p,), got shape {kx.shape}"
+        raise ValueError(msg)
+
+    model = slab.model
+    ifaces = slab.scatterer_ifaces
+    N_z = len(ifaces)
+    n_p = int(kx.shape[0])
+
+    # Validate that the slab's n_p matches the (kx, ky) sample count
+    first_T = slab.tmatrices[ifaces[0]]
+    if first_T.shape[0] != n_p:
+        msg = (
+            f"slab T-matrices have n_p={first_T.shape[0]} but kx has "
+            f"n_p={n_p}; they must agree"
+        )
+        raise ValueError(msg)
+
+    # 1. Background reflectivity (single-p path; one entry per slowness)
+    kH = np.sqrt(kx**2 + ky**2)
+    kH_safe = np.where(kH > 0, kH, 1e-30)
+    R_bg = _background_reflectivity(model, omega, kH_safe)
+
+    # 2. Background incident field (per slowness, per iface) → (n_p, 9)
+    psi0_per_iface = background_incident_field_9x9(model, omega, kx, ky, ifaces)
+
+    # 3. Inter-layer Green's matrix, block-diagonal in slowness
+    G_block_per_p = build_interlayer_greens_matrix_9x9(
+        model, omega, kx, ky, ifaces
+    )  # (n_p, 9·N_z, 9·N_z)
+
+    # 4. Build the (N, N) Foldy-Lax operator A = I - GT
+    A = _build_foldy_lax_matrix_multi_p(
+        G_block_per_p, slab.tmatrices, slab.number_densities, ifaces
+    )
+
+    # 5. Build the (N, n_p_obs) block RHS.
+    #    Ψ_inc[(i, p_state, k), p_obs] = δ_{p_state, p_obs} · ψ0[i, p_obs, k]
+    psi_inc_4d = np.zeros((N_z, n_p, n_p, 9), dtype=_CD)  # [i, p_state, p_obs, k]
+    for i, iface in enumerate(ifaces):
+        psi_iface = psi0_per_iface[iface]  # (n_p, 9)
+        # Diagonal in (p_state, p_obs)
+        for p_obs in range(n_p):
+            psi_inc_4d[i, p_obs, p_obs, :] = psi_iface[p_obs, :]
+
+    # Flatten to (N, n_p_obs): rows ordered (i, p_state, k), cols by p_obs.
+    # Transpose (i, p_state, p_obs, k) → (i, p_state, k, p_obs) first so that
+    # a C-order reshape groups the rows as (i, p_state, k) and the columns as
+    # p_obs, matching the row ordering of the matrix A.
+    N = N_z * n_p * 9
+    rhs = np.ascontiguousarray(psi_inc_4d.transpose(0, 1, 3, 2)).reshape(N, n_p)
+
+    # 6. Block solve
+    psi_exc_flat = np.linalg.solve(A, rhs)  # (N, n_p_obs)
+    psi_exc_4d = psi_exc_flat.reshape(N_z, n_p, 9, n_p)
+    # Reorder to (i, p_obs, p_state, k) for clean downstream einsums
+    psi_exc = psi_exc_4d.transpose(0, 3, 1, 2)  # (N_z, n_p_obs, n_p_state, 9)
+    psi_inc = psi_inc_4d.transpose(0, 2, 1, 3)  # (N_z, n_p_obs, n_p_state, 9)
+
+    # 7. Scattered reflectivity per p_obs.  For each (j, p_obs) compute
+    #    the moment m_j[p_emit=p_obs, l] = n_j · Σ_{p_in, m}
+    #        T_j[p_obs, p_in, l, m] · ψ_exc[j, p_obs, p_in, m]
+    #    then propagate via G_{0,j}(p_obs).  Convert (u, ε) → (u, t) via B,
+    #    apply 6×6 Green's, extract upgoing P at the ocean bottom.
+    R_total = R_bg.copy()
+    R_born = R_bg.copy()
+    miw = -1j * omega
+    nlayer, E_d, E_u, phase_d, e_d_oc, e_u_oc, e0 = _prepare_model_arrays(
+        model, omega, kH_safe
+    )
+    # Per-interface 6×6 Green's from j to ocean iface 0 (n_p, 6, 6)
+    for j_idx, iface_j in enumerate(ifaces):
+        n_j = slab.number_densities[iface_j]
+        T_j = slab.tmatrices[iface_j]  # (n_p, n_p, 9, 9)
+
+        # Foldy-Lax moments: m_j[p_obs, l] = n_j · einsum(
+        #   "pPlm,pPm->pl", T_j, psi_exc[j_idx, p_obs, :, :])
+        # We want, for each p_obs, the 9-vector
+        #   m[p_obs, l] = n_j · Σ_{p_in, m} T_j[p_obs, p_in, l, m]
+        #                          · ψ_exc[j_idx, p_obs, p_in, m]
+        psi_exc_j = psi_exc[j_idx]  # (n_p_obs, n_p_state, 9)
+        m_total = n_j * np.einsum(
+            "Pplm,Ppm->Pl",
+            T_j,
+            psi_exc_j,
+        )  # (n_p_obs, 9) — first index is p_obs (= p_emit)
+
+        psi_inc_j = psi_inc[j_idx]  # (n_p_obs, n_p_state, 9)
+        m_born = n_j * np.einsum(
+            "Pplm,Ppm->Pl",
+            T_j,
+            psi_inc_j,
+        )  # (n_p_obs, 9)
+
+        # Convert (u, ε) → (u, t) per p_obs via B at iface j
+        rho_j, alpha_j, beta_j = _interface_elastic_properties(model, iface_j)
+        B_j = traction_from_strain(rho_j, alpha_j, beta_j)  # (6, 9)
+        m_total_6 = m_total @ B_j.T  # (n_p_obs, 6)
+        m_born_6 = m_born @ B_j.T
+
+        # 6×6 Green's from j → 0 at each p_obs
+        G6_0j = layered_greens_6x6(
+            model, omega, kx, ky, source_iface=iface_j, receiver_iface=0
+        )  # (n_p, 6, 6)
+        scat_state6_total = np.einsum("pij,pj->pi", G6_0j, m_total_6)
+        scat_state6_born = np.einsum("pij,pj->pi", G6_0j, m_born_6)
+
+        # Extract upgoing P at ocean bottom: σ_zz physical → Riccati → / e_u_oc[1]
+        sigma_zz_total = scat_state6_total[:, 3] / miw
+        sigma_zz_born = scat_state6_born[:, 3] / miw
+        U0_P_total = sigma_zz_total / e_u_oc[:, 1]
+        U0_P_born = sigma_zz_born / e_u_oc[:, 1]
+        R_total = R_total + e0 * U0_P_total
+        R_born = R_born + e0 * U0_P_born
+
+    return InterlayerMSResult9x9MultiP(
+        R_background=R_bg,
+        R_total=R_total,
+        R_born=R_born,
+        psi_exciting=psi_exc,
+        psi_incident=psi_inc,
     )

@@ -28,6 +28,12 @@ Design notes:
       negative standard deviations.
 """
 
+import hashlib
+import json
+import multiprocessing as mp
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,14 +46,23 @@ from cubic_scattering import MaterialContrast, ReferenceMedium
 from Kennett_Reflectivity.layer_model import LayerModel
 from Kennett_Reflectivity.source import ricker_spectrum
 
-from .block_riccati_cluster import solve_slab_foldy_lax_freq_het
-from .interlayer_ms import ScattererSlab9x9, interlayer_ms_reflectivity_9x9
+from .block_riccati_cluster import (
+    solve_slab_foldy_lax_freq_het,
+    solve_slab_foldy_lax_single_freq_het_taup,
+)
+from .interlayer_ms import (
+    ScattererSlab9x9,
+    ScattererSlab9x9MultiP,
+    interlayer_ms_reflectivity_9x9,
+    interlayer_ms_reflectivity_9x9_multi_p,
+)
 
 __all__ = [
     "ScaleDemoConfig",
     "build_oceanic_crust_model",
     "compute_R_omega_p_stack",
     "compute_layer_composite_tmatrices_het",
+    "load_cached_tmatrices",
     "load_scale_demo_config",
     "plot_r_omega_p_heatmap",
     "plot_taup_wiggle_gather",
@@ -585,50 +600,606 @@ def sample_voxel_contrasts(
 # ---------------------------------------------------------------------------
 
 
+def _worker_init(extra_paths: list[str]) -> None:
+    """Initializer run once per worker process on spawn.
+
+    Adds project paths to ``sys.path`` so that
+    ``GlobalMatrix.taup_scale_demo`` and its siblings are importable
+    inside the worker, and clamps BLAS/OMP thread pools to a single
+    thread to prevent CPU oversubscription when N workers each spawn
+    BLAS thread pools sized to the full core count.
+
+    Must be module-level (not a closure) so it is picklable under the
+    ``spawn`` start method.
+    """
+    for key in (
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ):
+        os.environ.setdefault(key, "1")
+    for p in extra_paths:
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+
+
+# ---------------------------------------------------------------------------
+# Per-(iface, freq) disk cache
+# ---------------------------------------------------------------------------
+#
+# At fixed ω the Helmholtz operator is fixed: all ``n_p_in`` incident
+# slownesses become extra RHS columns of one block GMRES.  The natural
+# unit of work is therefore one (iface, freq) pair, each producing a
+# full slowness-coupling block ``T(p_out, p_in, 9, 9)`` for that
+# (layer, frequency).  We persist each block as a small .npz under
+# ``cache_dir/iface_{j:02d}/freq_{f:04d}.npz`` so the inner phase is
+# crash-resumable and decoupled from the outer Riccati sweep.
+#
+# Cache invalidation is automatic: a SHA-256 cache key over every
+# physically-relevant input (lattice, reference medium, ω, slowness
+# grids, per-cube contrasts, GMRES tolerances, k_par convention) is
+# stored in the .npz; on a hit the key is checked and the file is
+# ignored if anything drifted.
+
+
+def _make_cache_key(
+    *,
+    iface: int,
+    freq_idx: int,
+    omega: complex,
+    alpha: float,
+    beta: float,
+    rho: float,
+    M_vox: int,
+    N_z_vox: int,
+    a_km: float,
+    slowness_in_2d: NDArray[np.floating],
+    slowness_out_2d: NDArray[np.floating],
+    contrasts: list[MaterialContrast],
+    rtol: float,
+    max_iter: int,
+) -> str:
+    """SHA-256 hex digest over every input that affects ``T_block``.
+
+    Used as the cache validation key.  Any change in lattice, reference
+    medium, ω, 2D slowness grids, per-cube contrasts, GMRES tolerances,
+    or slowness convention triggers a cache miss.
+
+    Args:
+        iface: Interface index.
+        freq_idx: Frequency index.
+        omega: Single complex angular frequency at this slot.
+        alpha, beta, rho: Reference-medium elastic parameters.
+        M_vox, N_z_vox, a_km: Voxel-lattice parameters.
+        slowness_in_2d: Incident 2D slowness grid (s/km), shape
+            ``(n_p_in, 2)`` with columns ``(p_x, p_y)``.
+        slowness_out_2d: Outgoing 2D slowness grid (s/km), shape
+            ``(n_p_out, 2)`` with columns ``(p_x, p_y)``.
+        contrasts: Per-cube material contrasts (length ``M*M*N_z``).
+        rtol, max_iter: Block GMRES tolerances.
+
+    Returns:
+        64-character SHA-256 hex digest.
+    """
+    h = hashlib.sha256()
+    h.update(
+        json.dumps(
+            {
+                "iface": int(iface),
+                "freq_idx": int(freq_idx),
+                "omega_real": float(omega.real),
+                "omega_imag": float(omega.imag),
+                "alpha": float(alpha),
+                "beta": float(beta),
+                "rho": float(rho),
+                "M_vox": int(M_vox),
+                "N_z_vox": int(N_z_vox),
+                "a_km": float(a_km),
+                "rtol": float(rtol),
+                "max_iter": int(max_iter),
+                "k_par_convention": (
+                    "kx=omega*p_x, ky=omega*p_y, "
+                    "kz=sqrt((omega/beta)**2 - kx**2 - ky**2)"
+                ),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    p_in_arr = np.ascontiguousarray(slowness_in_2d, dtype=np.float64)
+    p_out_arr = np.ascontiguousarray(slowness_out_2d, dtype=np.float64)
+    h.update(b"slowness_in_2d:")
+    h.update(p_in_arr.tobytes())
+    h.update(b"slowness_out_2d:")
+    h.update(p_out_arr.tobytes())
+    contrasts_arr = np.array(
+        [(c.Dlambda, c.Dmu, c.Drho) for c in contrasts], dtype=np.float64
+    )
+    h.update(b"contrasts:")
+    h.update(contrasts_arr.tobytes())
+    return h.hexdigest()
+
+
+def _atomic_save_npz(path: Path, **arrays: Any) -> None:
+    """Save ``.npz`` atomically via ``write-then-rename``.
+
+    Writes to ``{path}.tmp`` first, then renames to ``{path}``.  Ensures
+    that a concurrent reader (or a crash mid-write) never observes a
+    half-written cache file.
+
+    ``np.savez`` auto-appends ``.npz`` to path-like arguments that don't
+    already end in ``.npz``, so we pass an open file handle instead to
+    force it to write to the exact temp path we chose.
+
+    Args:
+        path: Final destination path.
+        **arrays: Keyword arguments forwarded to ``np.savez``.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("wb") as fh:
+        np.savez(fh, **arrays)
+    os.replace(tmp_path, path)
+
+
+def _cache_path_for(cache_dir: Path, iface: int, freq_idx: int) -> Path:
+    """Return the canonical cache path for ``(iface, freq_idx)``."""
+    return cache_dir / f"iface_{iface:02d}" / f"freq_{freq_idx:04d}.npz"
+
+
+def _load_cached_layer_freq(
+    cache_dir: Path,
+    iface: int,
+    freq_idx: int,
+    cache_key: str,
+) -> NDArray[np.complexfloating] | None:
+    """Try to load a cached ``(n_p_out, n_p_in, 9, 9)`` block for ``(iface, freq_idx)``.
+
+    Returns ``None`` on a cache miss (file absent, key mismatch, or
+    corrupt file — corrupt files are silently ignored to be resumable
+    after a crash).
+
+    Args:
+        cache_dir: Root cache directory.
+        iface: Interface index.
+        freq_idx: Frequency index.
+        cache_key: Expected SHA-256 cache key.
+
+    Returns:
+        Cached ``T_block`` array, or ``None`` on miss.
+    """
+    path = _cache_path_for(cache_dir, iface, freq_idx)
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path) as data:
+            if str(data["cache_key"]) != cache_key:
+                return None
+            return np.asarray(data["T_block"], dtype=complex)
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def _kpar_array_for_omega(
+    omega: complex,
+    beta: float,
+    slowness_2d: NDArray[np.floating],
+) -> NDArray[np.complexfloating]:
+    """Build ``k_par[k] = (ω p_x, ω p_y, sqrt((ω/β)² − k_par²))`` at one ω.
+
+    Each row of ``slowness_2d`` is an arbitrary horizontal slowness pair
+    ``(p_x, p_y)`` in s/km.  The vertical wavenumber is derived from the
+    elastic dispersion of the local reference S-wave speed via
+    ``kz = sqrt((ω/β)² − (ω p_x)² − (ω p_y)²)``.  The complex square
+    root preserves the post-critical (evanescent) branch automatically:
+    when ``|k_par| > ω/β``, ``kz`` becomes purely imaginary with the
+    physically correct decaying sign for the propagation half-space.
+
+    The 2D-aware API lifts the ``p_y = 0`` restriction of the original
+    helper.  Single-azimuth τ-p along x-axis is the special case
+    ``slowness_2d = np.column_stack([p_values, np.zeros_like(p_values)])``;
+    full azimuthal coverage uses any other 2D grid (e.g. tensor-product
+    ``(p_x, p_y)`` or the FFT-native lattice).
+
+    Args:
+        omega: Single complex angular frequency.
+        beta: Reference S-wave speed (km/s).
+        slowness_2d: Horizontal slowness grid in s/km, shape ``(n_p, 2)``,
+            with columns ``(p_x, p_y)``.
+
+    Returns:
+        Per-slowness wave-vector stack, shape ``(n_p, 3)``, complex,
+        with columns ``(k_x, k_y, k_z)``.
+    """
+    p_arr = np.asarray(slowness_2d, dtype=np.float64)
+    if p_arr.ndim != 2 or p_arr.shape[1] != 2:
+        msg = (
+            f"slowness_2d has shape {p_arr.shape}, expected (n_p, 2) "
+            "with columns (p_x, p_y)."
+        )
+        raise ValueError(msg)
+    om = complex(omega)
+    kx = om * p_arr[:, 0]
+    ky = om * p_arr[:, 1]
+    kz_sq = (om / beta) ** 2 - kx**2 - ky**2
+    kz = np.sqrt(kz_sq)  # complex sqrt — branch is correct for evanescent
+    out = np.zeros((p_arr.shape[0], 3), dtype=complex)
+    out[:, 0] = kx
+    out[:, 1] = ky
+    out[:, 2] = kz
+    return out
+
+
+def _solve_layer_freq_het_worker(
+    iface: int,
+    freq_idx: int,
+    omega: complex,
+    layer_name: str,
+    alpha: float,
+    beta: float,
+    rho: float,
+    M_vox: int,
+    N_z_vox: int,
+    a_km: float,
+    slowness_in_2d: NDArray[np.floating],
+    slowness_out_2d: NDArray[np.floating],
+    contrasts: list[MaterialContrast],
+    rtol: float,
+    max_iter: int,
+    cache_dir_str: str | None,
+    force_recompute: bool,
+) -> tuple[
+    int,  # iface
+    int,  # freq_idx
+    str,  # layer_name
+    NDArray[np.complexfloating],  # T_block, shape (n_p_out, n_p_in, 9, 9)
+    int,  # iters
+    float,  # rel_res
+    bool,  # was_cached
+]:
+    """Per-(iface, freq) **slowness-batched** inner solve with disk caching.
+
+    Builds the incident and outgoing ``k_par`` stacks for ``omega`` from
+    the 2D slowness grids, calls
+    :func:`solve_slab_foldy_lax_single_freq_het_taup` once (one block
+    GMRES with ``9·n_p_in`` RHS columns), and persists the resulting
+    ``(n_p_out, n_p_in, 9, 9)`` block to
+    ``cache_dir/iface_{j:02d}/freq_{f:04d}.npz`` (atomic write).  On a
+    cache hit with matching ``cache_key`` the solve is skipped entirely.
+
+    Module-level (not a closure) so it is picklable under the ``spawn``
+    start method.
+
+    Args:
+        iface: Interface index.
+        freq_idx: Frequency index.
+        omega: Single complex angular frequency at this slot.
+        layer_name: Layer name (for verbose logging upstream).
+        alpha, beta, rho: Reference-medium parameters.
+        M_vox, N_z_vox, a_km: Voxel-lattice parameters.
+        slowness_in_2d: Incident 2D slowness grid (s/km), shape
+            ``(n_p_in, 2)`` with columns ``(p_x, p_y)``.
+        slowness_out_2d: Outgoing 2D slowness grid (s/km), shape
+            ``(n_p_out, 2)`` with columns ``(p_x, p_y)``.
+        contrasts: Per-cube material contrasts.
+        rtol, max_iter: Block GMRES tolerances.
+        cache_dir_str: Root cache directory as a string (or ``None`` to
+            disable caching for this job).  String rather than ``Path``
+            so the args tuple is trivially picklable.
+        force_recompute: If ``True``, ignore any existing cache hit and
+            re-run the solve (the new result still overwrites the file).
+
+    Returns:
+        Tuple ``(iface, freq_idx, layer_name, T_block, iters, rel_res,
+        was_cached)``.  When ``was_cached`` is ``True`` the ``iters``
+        and ``rel_res`` fields are loaded from the cache file.
+    """
+    cache_key = _make_cache_key(
+        iface=iface,
+        freq_idx=freq_idx,
+        omega=omega,
+        alpha=alpha,
+        beta=beta,
+        rho=rho,
+        M_vox=M_vox,
+        N_z_vox=N_z_vox,
+        a_km=a_km,
+        slowness_in_2d=slowness_in_2d,
+        slowness_out_2d=slowness_out_2d,
+        contrasts=contrasts,
+        rtol=rtol,
+        max_iter=max_iter,
+    )
+
+    cache_dir = Path(cache_dir_str) if cache_dir_str is not None else None
+    if cache_dir is not None and not force_recompute:
+        cached = _load_cached_layer_freq(cache_dir, iface, freq_idx, cache_key)
+        if cached is not None:
+            path = _cache_path_for(cache_dir, iface, freq_idx)
+            with np.load(path) as data:
+                iters_cached = int(data["iters"])
+                rel_res_cached = float(data["rel_res"])
+            return (
+                iface,
+                freq_idx,
+                layer_name,
+                cached,
+                iters_cached,
+                rel_res_cached,
+                True,
+            )
+
+    ref = ReferenceMedium(alpha=alpha, beta=beta, rho=rho)
+    k_par_in = _kpar_array_for_omega(omega, beta, slowness_in_2d)
+    k_par_out = _kpar_array_for_omega(omega, beta, slowness_out_2d)
+
+    T_block, iters_int, rel_res_val = solve_slab_foldy_lax_single_freq_het_taup(
+        M=M_vox,
+        N_z=N_z_vox,
+        a=a_km,
+        omega=omega,
+        ref=ref,
+        contrasts_per_cube=contrasts,
+        k_par_in=k_par_in,
+        k_par_out=k_par_out,
+        rtol=rtol,
+        max_iter=max_iter,
+    )
+
+    if cache_dir is not None:
+        path = _cache_path_for(cache_dir, iface, freq_idx)
+        _atomic_save_npz(
+            path,
+            T_block=T_block,
+            iters=np.int64(iters_int),
+            rel_res=np.float64(rel_res_val),
+            cache_key=np.array(cache_key),
+            iface=np.int64(iface),
+            freq_idx=np.int64(freq_idx),
+            omega=np.complex128(omega),
+            slowness_in_2d=np.asarray(slowness_in_2d, dtype=np.float64),
+            slowness_out_2d=np.asarray(slowness_out_2d, dtype=np.float64),
+        )
+
+    return (
+        iface,
+        freq_idx,
+        layer_name,
+        T_block,
+        int(iters_int),
+        float(rel_res_val),
+        False,
+    )
+
+
+def load_cached_tmatrices(
+    cache_dir: str | Path,
+    slowness_in_2d: NDArray[np.floating],
+    slowness_out_2d: NDArray[np.floating],
+    n_freq: int,
+) -> dict[int, NDArray[np.complexfloating]]:
+    """Re-load every cached ``(F, n_p_out, n_p_in, 9, 9)`` T-stack from ``cache_dir``.
+
+    Walks ``cache_dir/iface_*/freq_*.npz``, validates each block's
+    shape against ``(n_p_out, n_p_in, 9, 9)``, and assembles one
+    ``(F, n_p_out, n_p_in, 9, 9)`` array per interface by stacking
+    along the frequency axis.  Skips any interface for which one or
+    more ``(freq_idx)`` files are missing.
+
+    Args:
+        cache_dir: Root cache directory.
+        slowness_in_2d: Incident 2D slowness grid (s/km), shape
+            ``(n_p_in, 2)`` with columns ``(p_x, p_y)``.
+        slowness_out_2d: Outgoing 2D slowness grid (s/km), shape
+            ``(n_p_out, 2)`` with columns ``(p_x, p_y)``.
+        n_freq: Expected number of frequency slots in the cache.
+
+    Returns:
+        Dict mapping interface index →
+        ``(F, n_p_out, n_p_in, 9, 9)`` complex array.  Interfaces with
+        any missing or mismatched cache file are omitted from the dict.
+
+    Raises:
+        FileNotFoundError: If ``cache_dir`` does not exist.
+    """
+    cdir = Path(cache_dir)
+    if not cdir.is_dir():
+        msg = (
+            f"Cache directory not found: {cdir}. "
+            "Did you forget to run the inner solver, or pass the wrong path?"
+        )
+        raise FileNotFoundError(msg)
+
+    n_p_in = int(np.asarray(slowness_in_2d).shape[0])
+    n_p_out = int(np.asarray(slowness_out_2d).shape[0])
+    iface_dirs = sorted(cdir.glob("iface_*"))
+    out: dict[int, NDArray[np.complexfloating]] = {}
+    for iface_dir in iface_dirs:
+        try:
+            iface = int(iface_dir.name.split("_")[1])
+        except (IndexError, ValueError):
+            continue
+        T_stack = np.zeros((n_freq, n_p_out, n_p_in, 9, 9), dtype=complex)
+        complete = True
+        for f_idx in range(n_freq):
+            path = _cache_path_for(cdir, iface, f_idx)
+            if not path.is_file():
+                complete = False
+                break
+            with np.load(path) as data:
+                T_block = np.asarray(data["T_block"], dtype=complex)
+                if T_block.shape != (n_p_out, n_p_in, 9, 9):
+                    complete = False
+                    break
+                T_stack[f_idx] = T_block
+        if complete:
+            out[iface] = T_stack
+    return out
+
+
+def _solve_single_layer_het_worker(
+    iface: int,
+    layer_name: str,
+    alpha: float,
+    beta: float,
+    rho: float,
+    M_vox: int,
+    N_z_vox: int,
+    a_km: float,
+    omegas: NDArray[np.complexfloating],
+    contrasts: list[MaterialContrast],
+    batch_sizes: list[int],
+    rtol: float,
+    max_iter: int,
+) -> tuple[int, str, NDArray[np.complexfloating], int, NDArray[np.floating]]:
+    """Per-layer block Foldy-Lax inner solve (picklable for ProcessPoolExecutor).
+
+    Runs one or more frequency-batched calls of
+    :func:`solve_slab_foldy_lax_freq_het` and concatenates the chunks
+    along the frequency axis.  This is the unit of work dispatched to
+    worker processes when ``n_workers > 1``.
+
+    Args:
+        iface: Interface index (for result association).
+        layer_name: Layer name (for verbose logging in the parent).
+        alpha, beta, rho: Reference-medium elastic parameters.
+        M_vox: Voxel lattice edge (M × M in-plane).
+        N_z_vox: Number of z-slices of cubes.
+        a_km: Cube half-width in km.
+        omegas: Complex angular frequencies, shape ``(F,)``.
+        contrasts: Per-cube material contrasts (length ``M*M*N_z``).
+        batch_sizes: Frequency-batch sizes that sum to ``F``.
+        rtol: Block GMRES relative-residual tolerance.
+        max_iter: Block GMRES maximum iterations.
+
+    Returns:
+        Tuple ``(iface, layer_name, T_freq, max_iters, res)`` where
+        ``T_freq`` has shape ``(F, 9, 9)`` and ``res`` has shape ``(F,)``.
+    """
+    ref = ReferenceMedium(alpha=alpha, beta=beta, rho=rho)
+    T_chunks: list[NDArray[np.complexfloating]] = []
+    res_chunks: list[NDArray[np.floating]] = []
+    max_iters = 0
+    cursor = 0
+    for step in batch_sizes:
+        omegas_chunk = omegas[cursor : cursor + step]
+        T_chunk, it_chunk, res_chunk = solve_slab_foldy_lax_freq_het(
+            M=M_vox,
+            N_z=N_z_vox,
+            a=a_km,
+            omegas=omegas_chunk,
+            ref=ref,
+            contrasts_per_cube=contrasts,
+            rtol=rtol,
+            max_iter=max_iter,
+        )
+        T_chunks.append(T_chunk)
+        res_chunks.append(res_chunk)
+        max_iters = max(max_iters, int(it_chunk))
+        cursor += step
+    T_freq = np.concatenate(T_chunks, axis=0)
+    res = np.concatenate(res_chunks, axis=0)
+    return iface, layer_name, T_freq, max_iters, res
+
+
 def compute_layer_composite_tmatrices_het(
     config: ScaleDemoConfig,
     voxel_contrasts: dict[int, list[MaterialContrast]],
     omegas: NDArray[np.complexfloating],
     *,
+    slowness_2d: NDArray[np.floating] | None = None,
+    cache_dir: str | Path | None = None,
+    force_recompute: bool = False,
     freq_batch_size: int | None = None,
+    n_workers: int | None = None,
     verbose: bool = False,
 ) -> tuple[
     dict[int, NDArray[np.complexfloating]],
     dict[int, int],
     dict[int, NDArray[np.floating]],
 ]:
-    """Per-layer heterogeneous block Foldy-Lax → composite ``(F, 9, 9)``.
+    """Per-layer heterogeneous block Foldy-Lax → composite T stack.
 
-    For each elastic interface ``j``, constructs the layer's reference
-    medium from :class:`LayerModel` properties and calls
-    :func:`solve_slab_foldy_lax_freq_het` with the sampled per-cube
-    contrasts.  Layers whose contrasts are all zero (e.g. from a user
-    override forcing all Δλ=Δμ=Δρ=0) are skipped.
+    Two operating modes, controlled by ``slowness_2d``:
 
-    When ``freq_batch_size`` is set, the frequency grid is split into
-    chunks and the solver is called once per chunk, concatenating the
-    per-chunk ``(F, 9, 9)`` outputs.  This keeps the block GMRES Krylov
-    basis under the 4 GB per-call memory cap for large lattices (the
-    cap scales as ``F · n_cubes · max_iter``).
+    * **k-space mode** (``slowness_2d is None``, legacy): for each
+      elastic interface, runs one freq-batched solve at normal incidence
+      (``k_hat = ẑ``, ``wave_type = "S"``).  Returns
+      ``dict[int, (F, 9, 9)]`` — the original semantics.
+
+    * **τ-p mode** (``slowness_2d`` provided as a 2D ``(n_p, 2)`` array
+      of ``(p_x, p_y)`` pairs in s/km): for each elastic interface and
+      each frequency ``ω_f``, runs **one** slowness-batched solve via
+      :func:`solve_slab_foldy_lax_single_freq_het_taup` with all ``n_p``
+      incident 2D slownesses stacked as the RHS columns and the same
+      grid as the outgoing-slowness projection target.  Returns
+      ``dict[int, (F, n_p, n_p, 9, 9)]`` — the full 2D slowness
+      coupling block at every (iface, ω).  Single-azimuth τ-p along
+      x-axis is the special case where every row has ``p_y = 0``;
+      arbitrary 2D grids (tensor-product, FFT-native, off-axis) are
+      handled identically.  At full scale this is
+      ``18 × 256 = 4608`` independent jobs; the work is dispatched to
+      a :class:`ProcessPoolExecutor` and each job's result is persisted
+      to ``cache_dir`` so the inner phase is crash-resumable and can be
+      re-loaded by :func:`load_cached_tmatrices` after the fact.
+
+    Layers whose contrasts are all zero (e.g. from a user override
+    forcing all Δλ=Δμ=Δρ=0) are skipped in both modes.
+
+    When ``freq_batch_size`` is set in k-space mode, the frequency grid
+    is split into chunks and the solver is called once per chunk.  In
+    τ-p mode each (iface, freq) job is one block GMRES with
+    ``9·n_p`` RHS columns; parallelism is across (iface, freq) and
+    each worker clamps BLAS threads to 1 to avoid oversubscription.
 
     Args:
         config: Scale-demo configuration.
         voxel_contrasts: Dict mapping iface → per-cube contrasts.
         omegas: Complex angular frequencies, shape ``(F,)``.
-        freq_batch_size: Optional maximum number of frequencies to
-            process in one block GMRES call.  ``None`` means process
-            all ``F`` frequencies in one go.
-        verbose: If True, print per-layer iteration/residual summary.
+        slowness_2d: Optional 2D horizontal slowness grid (s/km) of
+            shape ``(n_p, 2)`` with columns ``(p_x, p_y)``.  When
+            ``None``, the legacy normal-incidence path is used.  When
+            provided, the output T-stack has shape
+            ``(F, n_p, n_p, 9, 9)`` per interface — the full 2D
+            slowness coupling block at every ω.
+        cache_dir: Directory to persist per-(iface, freq) results in.
+            Required for τ-p mode (highly recommended for crash
+            resumability).  Ignored in k-space mode.
+        force_recompute: When ``True``, ignore any existing cache hits
+            and re-run every job.  The fresh result still overwrites
+            the file.  Ignored in k-space mode.
+        freq_batch_size: Optional max frequencies per block GMRES call.
+            k-space mode only.
+        n_workers: Optional number of worker processes for parallel
+            execution.  ``None`` or ``1`` runs jobs sequentially.
+            Values ``≥ 2`` use :class:`ProcessPoolExecutor` with the
+            ``spawn`` start method; BLAS thread pools are clamped to
+            one thread per worker.
+        verbose: If True, print per-job iteration/residual summary.
 
     Returns:
         Tuple ``(tmatrices, iters, rel_res)`` where:
 
-        * ``tmatrices[j]`` has shape ``(F, 9, 9)``.
-        * ``iters[j]`` is the **maximum** number of block GMRES
-          iterations across frequency batches.
-        * ``rel_res[j]`` has shape ``(F,)`` giving per-ω relative
-          residuals (concatenated over batches).
+        * In k-space mode: ``tmatrices[j]`` has shape ``(F, 9, 9)``,
+          ``iters[j]`` is the max iterations across frequency chunks,
+          and ``rel_res[j]`` has shape ``(F,)``.
+        * In τ-p mode: ``tmatrices[j]`` has shape
+          ``(F, n_p, n_p, 9, 9)``, ``iters[j]`` is the max iterations
+          across all ``(freq_idx)`` jobs for that interface, and
+          ``rel_res[j]`` has shape ``(F,)``.
     """
+    if slowness_2d is not None:
+        return _compute_layer_composite_tmatrices_het_taup(
+            config=config,
+            voxel_contrasts=voxel_contrasts,
+            omegas=omegas,
+            slowness_2d=slowness_2d,
+            cache_dir=cache_dir,
+            force_recompute=force_recompute,
+            n_workers=n_workers,
+            verbose=verbose,
+        )
+
     M_vox = config.voxels.M
     N_z_vox = config.voxels.N_z
     a_km = config.voxels.a_km
@@ -647,51 +1218,322 @@ def compute_layer_composite_tmatrices_het(
     iters: dict[int, int] = {}
     rel_res: dict[int, NDArray[np.floating]] = {}
 
+    # Pre-filter: build the list of layers that actually need solving.
+    # Layers with all-zero contrasts are a user escape hatch to skip
+    # a particular interface without touching the solver.
+    pending: list[tuple[int, LayerSpec, list[MaterialContrast]]] = []
     for iface, contrasts in voxel_contrasts.items():
-        # Skip layers whose contrasts are all exactly zero — a way for
-        # the user to force a particular layer out of the scattering
-        # path without touching the solver.
         if all(c.Dlambda == 0.0 and c.Dmu == 0.0 and c.Drho == 0.0 for c in contrasts):
             if verbose:
                 print(f"  iface {iface}: all-zero contrasts; skipping")
             continue
+        pending.append((iface, config.layers[iface], contrasts))
 
-        layer = config.layers[iface]
-        ref = ReferenceMedium(alpha=layer.alpha, beta=layer.beta, rho=layer.rho)
+    if not pending:
+        return tmatrices, iters, rel_res
 
-        T_chunks: list[NDArray[np.complexfloating]] = []
-        res_chunks: list[NDArray[np.floating]] = []
-        max_iters = 0
-        cursor = 0
-        for step in batch_sizes:
-            omegas_chunk = omegas[cursor : cursor + step]
-            T_chunk, it_chunk, res_chunk = solve_slab_foldy_lax_freq_het(
-                M=M_vox,
-                N_z=N_z_vox,
-                a=a_km,
-                omegas=omegas_chunk,
-                ref=ref,
-                contrasts_per_cube=contrasts,
+    use_parallel = n_workers is not None and n_workers >= 2 and len(pending) >= 2
+
+    if not use_parallel:
+        for iface, layer, contrasts in pending:
+            _, _, T_freq, max_iters, res = _solve_single_layer_het_worker(
+                iface=iface,
+                layer_name=layer.name,
+                alpha=layer.alpha,
+                beta=layer.beta,
+                rho=layer.rho,
+                M_vox=M_vox,
+                N_z_vox=N_z_vox,
+                a_km=a_km,
+                omegas=omegas,
+                contrasts=contrasts,
+                batch_sizes=batch_sizes,
                 rtol=config.block_gmres_rtol,
                 max_iter=config.block_gmres_max_iter,
             )
-            T_chunks.append(T_chunk)
-            res_chunks.append(res_chunk)
-            max_iters = max(max_iters, int(it_chunk))
-            cursor += step
+            tmatrices[iface] = T_freq
+            iters[iface] = max_iters
+            rel_res[iface] = res
+            if verbose:
+                max_res = float(np.max(res))
+                print(
+                    f"  iface {iface:2d} ({layer.name:>10s}): "
+                    f"iters≤{max_iters:2d}, max rel res={max_res:.2e}"
+                )
+        return tmatrices, iters, rel_res
 
-        T_freq = np.concatenate(T_chunks, axis=0)
-        res = np.concatenate(res_chunks, axis=0)
-        tmatrices[iface] = T_freq
-        iters[iface] = max_iters
-        rel_res[iface] = res
-        if verbose:
-            max_res = float(np.max(res))
-            print(
-                f"  iface {iface:2d} ({layer.name:>10s}): "
-                f"iters≤{max_iters:2d}, max rel res={max_res:.2e}"
+    # Layer-parallel path: spawn one worker per CPU (up to n_workers),
+    # feed each independent layer as a separate task.  Spawn context
+    # avoids fork-related issues with macOS + numpy + scipy.  The
+    # initializer sets up sys.path and clamps BLAS thread pools to 1.
+    n_effective = min(int(n_workers), len(pending))  # type: ignore[arg-type]
+    project_root = str(Path(__file__).resolve().parents[1])
+    sibling_root = str(Path(project_root).parent / "MultipleScatteringCalculations")
+    extra_paths = [project_root, sibling_root]
+
+    ctx = mp.get_context("spawn")
+
+    with ProcessPoolExecutor(
+        max_workers=n_effective,
+        mp_context=ctx,
+        initializer=_worker_init,
+        initargs=(extra_paths,),
+    ) as executor:
+        futures = {
+            executor.submit(
+                _solve_single_layer_het_worker,
+                iface,
+                layer.name,
+                layer.alpha,
+                layer.beta,
+                layer.rho,
+                M_vox,
+                N_z_vox,
+                a_km,
+                omegas,
+                contrasts,
+                batch_sizes,
+                config.block_gmres_rtol,
+                config.block_gmres_max_iter,
+            ): iface
+            for iface, layer, contrasts in pending
+        }
+        for fut in as_completed(futures):
+            iface, layer_name, T_freq, max_iters, res = fut.result()
+            tmatrices[iface] = T_freq
+            iters[iface] = max_iters
+            rel_res[iface] = res
+            if verbose:
+                max_res = float(np.max(res))
+                print(
+                    f"  iface {iface:2d} ({layer_name:>10s}): "
+                    f"iters≤{max_iters:2d}, max rel res={max_res:.2e}"
+                )
+
+    # Stable dict ordering by iface so downstream code that iterates
+    # sees layers in canonical order.
+    tmatrices = {k: tmatrices[k] for k in sorted(tmatrices)}
+    iters = {k: iters[k] for k in sorted(iters)}
+    rel_res = {k: rel_res[k] for k in sorted(rel_res)}
+    return tmatrices, iters, rel_res
+
+
+def _compute_layer_composite_tmatrices_het_taup(
+    *,
+    config: ScaleDemoConfig,
+    voxel_contrasts: dict[int, list[MaterialContrast]],
+    omegas: NDArray[np.complexfloating],
+    slowness_2d: NDArray[np.floating],
+    cache_dir: str | Path | None,
+    force_recompute: bool,
+    n_workers: int | None,
+    verbose: bool,
+) -> tuple[
+    dict[int, NDArray[np.complexfloating]],
+    dict[int, int],
+    dict[int, NDArray[np.floating]],
+]:
+    """τ-p-mode body of :func:`compute_layer_composite_tmatrices_het`.
+
+    Slowness-batched architecture: at fixed ω the Helmholtz operator is
+    fixed, so all ``n_p`` incident 2D slownesses become extra RHS
+    columns of one block GMRES.  The unit of work is therefore one
+    ``(iface, freq_idx)`` pair, and one call produces the full
+    ``(n_p, n_p, 9, 9)`` slowness-coupling block for that
+    layer-frequency.
+
+    The ``slowness_2d`` grid is used as both the incident and the
+    outgoing slowness grid (n_p_in = n_p_out = n_p): the slowness
+    coupling matrix is square and the multi-slowness Riccati outer
+    sweep consumes the same grid on both legs.  Each row is an
+    arbitrary horizontal slowness pair ``(p_x, p_y)``; single-azimuth
+    τ-p along x-axis is the special case ``p_y = 0``.
+    """
+    M_vox = config.voxels.M
+    N_z_vox = config.voxels.N_z
+    a_km = config.voxels.a_km
+    n_freq = int(omegas.shape[0])
+    slowness_arr = np.asarray(slowness_2d, dtype=np.float64)
+    if slowness_arr.ndim != 2 or slowness_arr.shape[1] != 2:
+        msg = (
+            f"slowness_2d has shape {slowness_arr.shape}, "
+            "expected (n_p, 2) with columns (p_x, p_y)."
+        )
+        raise ValueError(msg)
+    n_p = int(slowness_arr.shape[0])
+    slowness_in_2d = slowness_arr
+    slowness_out_2d = slowness_arr  # square coupling on the same 2D grid
+
+    cache_dir_path = Path(cache_dir) if cache_dir is not None else None
+    if cache_dir_path is not None:
+        cache_dir_path.mkdir(parents=True, exist_ok=True)
+        # Drop a human-readable manifest so future debugging can pin
+        # down which run produced these files.
+        meta = {
+            "M_vox": M_vox,
+            "N_z_vox": N_z_vox,
+            "a_km": a_km,
+            "n_freq": n_freq,
+            "n_p_in": n_p,
+            "n_p_out": n_p,
+            "slowness_2d": [[float(p) for p in row] for row in slowness_in_2d],
+            "omegas_real": [float(o.real) for o in omegas],
+            "omegas_imag": [float(o.imag) for o in omegas],
+            "rtol": float(config.block_gmres_rtol),
+            "max_iter": int(config.block_gmres_max_iter),
+            "k_par_convention": (
+                "kx=omega*p_x, ky=omega*p_y, kz=sqrt((omega/beta)**2 - kx**2 - ky**2)"
+            ),
+            "random_seed": int(config.random_seed),
+            "architecture": "slowness-batched per (iface, freq)",
+        }
+        (cache_dir_path / "cache_meta.json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8"
+        )
+
+    # Pre-filter: build the list of layers that actually need solving.
+    pending_layers: list[tuple[int, LayerSpec, list[MaterialContrast]]] = []
+    for iface, contrasts in voxel_contrasts.items():
+        if all(c.Dlambda == 0.0 and c.Dmu == 0.0 and c.Drho == 0.0 for c in contrasts):
+            if verbose:
+                print(f"  iface {iface}: all-zero contrasts; skipping")
+            continue
+        pending_layers.append((iface, config.layers[iface], contrasts))
+
+    tmatrices: dict[int, NDArray[np.complexfloating]] = {}
+    iters: dict[int, int] = {}
+    rel_res: dict[int, NDArray[np.floating]] = {}
+
+    if not pending_layers:
+        return tmatrices, iters, rel_res
+
+    # Allocate per-iface (F, n_p_out, n_p_in, 9, 9) buffers up front so
+    # workers can stream their results into them via (iface, freq_idx)
+    # routing as completions arrive.
+    for iface, _, _ in pending_layers:
+        tmatrices[iface] = np.zeros((n_freq, n_p, n_p, 9, 9), dtype=complex)
+        iters[iface] = 0
+        rel_res[iface] = np.zeros(n_freq, dtype=np.float64)
+
+    # Build the (iface, freq_idx) job list.
+    jobs: list[tuple[int, int, LayerSpec, list[MaterialContrast]]] = []
+    for iface, layer, contrasts in pending_layers:
+        for f_idx in range(n_freq):
+            jobs.append((iface, f_idx, layer, contrasts))
+
+    cache_dir_str = str(cache_dir_path) if cache_dir_path is not None else None
+    use_parallel = n_workers is not None and n_workers >= 2 and len(jobs) >= 2
+
+    if verbose:
+        print(
+            f"  τ-p mode: {len(pending_layers)} ifaces × {n_freq} freqs "
+            f"= {len(jobs)} jobs (n_p={n_p} stacked as RHS columns)"
+            + (f", n_workers={n_workers}" if use_parallel else " (sequential)")
+        )
+
+    if not use_parallel:
+        for iface, f_idx, layer, contrasts in jobs:
+            (
+                _,
+                _,
+                _,
+                T_block,
+                its,
+                rr,
+                was_cached,
+            ) = _solve_layer_freq_het_worker(
+                iface=iface,
+                freq_idx=f_idx,
+                omega=complex(omegas[f_idx]),
+                layer_name=layer.name,
+                alpha=layer.alpha,
+                beta=layer.beta,
+                rho=layer.rho,
+                M_vox=M_vox,
+                N_z_vox=N_z_vox,
+                a_km=a_km,
+                slowness_in_2d=slowness_in_2d,
+                slowness_out_2d=slowness_out_2d,
+                contrasts=contrasts,
+                rtol=config.block_gmres_rtol,
+                max_iter=config.block_gmres_max_iter,
+                cache_dir_str=cache_dir_str,
+                force_recompute=force_recompute,
             )
+            tmatrices[iface][f_idx] = T_block
+            iters[iface] = max(iters[iface], int(its))
+            rel_res[iface][f_idx] = rr
+            if verbose:
+                tag = "cached" if was_cached else "solved"
+                print(
+                    f"  iface {iface:2d} ({layer.name:>10s}) f[{f_idx:4d}]"
+                    f"={float(omegas[f_idx].real):.3f}rad/s: "
+                    f"iters={its:2d}, rel res={rr:.2e} [{tag}]"
+                )
+        return tmatrices, iters, rel_res
 
+    n_effective = min(int(n_workers), len(jobs))  # type: ignore[arg-type]
+    project_root = str(Path(__file__).resolve().parents[1])
+    sibling_root = str(Path(project_root).parent / "MultipleScatteringCalculations")
+    extra_paths = [project_root, sibling_root]
+    ctx = mp.get_context("spawn")
+
+    with ProcessPoolExecutor(
+        max_workers=n_effective,
+        mp_context=ctx,
+        initializer=_worker_init,
+        initargs=(extra_paths,),
+    ) as executor:
+        futures = {}
+        for iface, f_idx, layer, contrasts in jobs:
+            fut = executor.submit(
+                _solve_layer_freq_het_worker,
+                iface,
+                f_idx,
+                complex(omegas[f_idx]),
+                layer.name,
+                layer.alpha,
+                layer.beta,
+                layer.rho,
+                M_vox,
+                N_z_vox,
+                a_km,
+                slowness_in_2d,
+                slowness_out_2d,
+                contrasts,
+                config.block_gmres_rtol,
+                config.block_gmres_max_iter,
+                cache_dir_str,
+                force_recompute,
+            )
+            futures[fut] = (iface, f_idx, layer.name)
+
+        completed = 0
+        for fut in as_completed(futures):
+            (
+                iface,
+                f_idx,
+                _layer_name,
+                T_block,
+                its,
+                rr,
+                was_cached,
+            ) = fut.result()
+            tmatrices[iface][f_idx] = T_block
+            iters[iface] = max(iters[iface], int(its))
+            rel_res[iface][f_idx] = rr
+            completed += 1
+            if verbose:
+                tag = "cached" if was_cached else "solved"
+                print(
+                    f"  [{completed:4d}/{len(jobs)}] iface {iface:2d} "
+                    f"f[{f_idx:4d}]={float(omegas[f_idx].real):.3f}rad/s: "
+                    f"iters={its:2d}, rel res={rr:.2e} [{tag}]"
+                )
+
+    tmatrices = {k: tmatrices[k] for k in sorted(tmatrices)}
+    iters = {k: iters[k] for k in sorted(iters)}
+    rel_res = {k: rel_res[k] for k in sorted(rel_res)}
     return tmatrices, iters, rel_res
 
 
@@ -704,20 +1546,39 @@ def compute_R_omega_p_stack(
     model: LayerModel,
     tmatrices_per_iface: dict[int, NDArray[np.complexfloating]],
     omegas: NDArray[np.complexfloating],
-    p_values: NDArray[np.floating],
+    slowness_2d: NDArray[np.floating],
     n_density: float,
 ) -> tuple[NDArray[np.complexfloating], NDArray[np.complexfloating]]:
     """Per-ω Riccati interlayer-MS sweep → ``R_total(ω, p)`` stack.
 
-    For each frequency, builds a :class:`ScattererSlab9x9` with the
-    per-iface T-matrices at that ω and calls
-    :func:`interlayer_ms_reflectivity_9x9` at ``(kx, ky) = (ω p, 0)``.
+    The horizontal slowness grid is fully 2D: ``slowness_2d`` has shape
+    ``(n_p, 2)`` and each row is an ``(p_x, p_y)`` pair in s/km.  At
+    each ω the wavenumbers are
+    ``kx = ω · p_x``, ``ky = ω · p_y``.  Single-azimuth τ-p along the
+    x-axis is the special case ``slowness_2d[:, 1] = 0``.
+
+    Three input shapes for ``tmatrices_per_iface[j]`` are accepted:
+
+    * **3D ``(F, 9, 9)``** (k-space mode): one composite per ω, reused
+      across all slownesses.  Physically inconsistent at oblique
+      incidence but kept for the legacy normal-incidence path.
+    * **4D ``(F, n_p, 9, 9)``** (τ-p mode, diagonal): one composite per
+      ``(ω, p)``, no slowness coupling.  This is the contract of the
+      previous τ-p path; new code should prefer the 5D shape below.
+    * **5D ``(F, n_p_out, n_p_in, 9, 9)``** (τ-p mode, full coupling):
+      the full slowness-coupling block produced by the slowness-batched
+      inner solver.  Consumed by
+      :func:`interlayer_ms_reflectivity_9x9_multi_p`, which solves the
+      joint Foldy-Lax system coupling every slowness at every scatterer
+      interface.  One multi-p solve per ω.
 
     Args:
         model: Background stratified elastic model.
-        tmatrices_per_iface: Dict mapping iface → ``(F, 9, 9)`` T stack.
+        tmatrices_per_iface: Dict mapping iface → ``(F, 9, 9)``,
+            ``(F, n_p, 9, 9)`` or ``(F, n_p_out, n_p_in, 9, 9)`` T-stack.
         omegas: Complex angular frequencies, shape ``(F,)``.
-        p_values: Horizontal slownesses in s/km, shape ``(n_p,)``.
+        slowness_2d: 2D horizontal slownesses in s/km, shape
+            ``(n_p, 2)`` with columns ``(p_x, p_y)``.
         n_density: Areal number density (scatterers per unit area) —
             ``1 / (2 a)²`` for a space-filling lattice.
 
@@ -730,27 +1591,123 @@ def compute_R_omega_p_stack(
         msg = "tmatrices_per_iface is empty; cannot build ScattererSlab9x9"
         raise ValueError(msg)
 
+    p_arr = np.asarray(slowness_2d, dtype=np.float64)
+    if p_arr.ndim != 2 or p_arr.shape[1] != 2:
+        msg = (
+            f"slowness_2d has shape {p_arr.shape}, expected (n_p, 2) "
+            "with columns (p_x, p_y)."
+        )
+        raise ValueError(msg)
+
     n_freq = omegas.shape[0]
-    n_p = p_values.shape[0]
+    n_p = int(p_arr.shape[0])
+    px = p_arr[:, 0]
+    py = p_arr[:, 1]
     ifaces = sorted(tmatrices_per_iface.keys())
+
+    # Detect 5D vs 4D vs 3D layout via the first iface; require all
+    # ifaces to share the same layout.
+    first_shape = tmatrices_per_iface[ifaces[0]].shape
+    coupled_mode = False
+    if len(first_shape) == 5:
+        if first_shape != (n_freq, n_p, n_p, 9, 9):
+            msg = (
+                f"tmatrices_per_iface[{ifaces[0]}] has shape {first_shape}, "
+                f"expected ({n_freq}, {n_p}, {n_p}, 9, 9) for slowness-"
+                "coupled τ-p mode"
+            )
+            raise ValueError(msg)
+        coupled_mode = True
+        per_p_mode = True  # we still produce (F, n_p) output
+    elif len(first_shape) == 4:
+        per_p_mode = True
+        if first_shape != (n_freq, n_p, 9, 9):
+            msg = (
+                f"tmatrices_per_iface[{ifaces[0]}] has shape {first_shape}, "
+                f"expected ({n_freq}, {n_p}, 9, 9) for τ-p mode"
+            )
+            raise ValueError(msg)
+    elif len(first_shape) == 3:
+        per_p_mode = False
+        if first_shape != (n_freq, 9, 9):
+            msg = (
+                f"tmatrices_per_iface[{ifaces[0]}] has shape {first_shape}, "
+                f"expected ({n_freq}, 9, 9) for k-space mode"
+            )
+            raise ValueError(msg)
+    else:
+        msg = (
+            f"tmatrices_per_iface[{ifaces[0]}] has ndim={len(first_shape)}; "
+            "expected 3 (F, 9, 9), 4 (F, n_p, 9, 9), or "
+            "5 (F, n_p_out, n_p_in, 9, 9)"
+        )
+        raise ValueError(msg)
+    for j in ifaces[1:]:
+        if tmatrices_per_iface[j].shape != first_shape:
+            msg = (
+                f"tmatrices_per_iface[{j}] shape {tmatrices_per_iface[j].shape} "
+                f"differs from iface {ifaces[0]} shape {first_shape}"
+            )
+            raise ValueError(msg)
 
     R_total = np.zeros((n_freq, n_p), dtype=complex)
     R_ref = np.zeros((n_freq, n_p), dtype=complex)
 
+    if not per_p_mode:
+        # Legacy: one composite per ω, reused across all slownesses.
+        for f_idx in range(n_freq):
+            tmats_f = {j: tmatrices_per_iface[j][f_idx] for j in ifaces}
+            slab = ScattererSlab9x9(
+                model=model,
+                scatterer_ifaces=ifaces,
+                tmatrices=tmats_f,
+                number_densities={j: n_density for j in ifaces},
+            )
+            om = complex(omegas[f_idx])
+            kx = om.real * px
+            ky = om.real * py
+            res = interlayer_ms_reflectivity_9x9(slab, om, kx, ky)
+            R_total[f_idx] = res.R_total
+            R_ref[f_idx] = res.R_background
+        return R_total, R_ref
+
+    if coupled_mode:
+        # 5D τ-p mode (full slowness coupling): one multi-p Riccati
+        # solve per ω, consuming the entire (n_p, n_p, 9, 9) block.
+        for f_idx in range(n_freq):
+            om = complex(omegas[f_idx])
+            tmats_f = {j: tmatrices_per_iface[j][f_idx] for j in ifaces}
+            slab_mp = ScattererSlab9x9MultiP(
+                model=model,
+                scatterer_ifaces=ifaces,
+                tmatrices=tmats_f,
+                number_densities={j: n_density for j in ifaces},
+            )
+            kx = om.real * px
+            ky = om.real * py
+            res_mp = interlayer_ms_reflectivity_9x9_multi_p(slab_mp, om, kx, ky)
+            R_total[f_idx] = res_mp.R_total
+            R_ref[f_idx] = res_mp.R_background
+        return R_total, R_ref
+
+    # 4D τ-p mode (diagonal): build a fresh ScattererSlab9x9 per
+    # (f_idx, p_idx) so the composite T at that (ω, p) is consumed by
+    # interlayer_ms at that exact (ω, p).
     for f_idx in range(n_freq):
-        tmats_f = {j: tmatrices_per_iface[j][f_idx] for j in ifaces}
-        slab = ScattererSlab9x9(
-            model=model,
-            scatterer_ifaces=ifaces,
-            tmatrices=tmats_f,
-            number_densities={j: n_density for j in ifaces},
-        )
         om = complex(omegas[f_idx])
-        kx = om.real * p_values
-        ky = np.zeros_like(kx)
-        res = interlayer_ms_reflectivity_9x9(slab, om, kx, ky)
-        R_total[f_idx] = res.R_total
-        R_ref[f_idx] = res.R_background
+        for p_idx in range(n_p):
+            tmats_fp = {j: tmatrices_per_iface[j][f_idx, p_idx] for j in ifaces}
+            slab = ScattererSlab9x9(
+                model=model,
+                scatterer_ifaces=ifaces,
+                tmatrices=tmats_fp,
+                number_densities={j: n_density for j in ifaces},
+            )
+            kx = np.array([om.real * float(px[p_idx])])
+            ky = np.array([om.real * float(py[p_idx])])
+            res = interlayer_ms_reflectivity_9x9(slab, om, kx, ky)
+            R_total[f_idx, p_idx] = res.R_total[0]
+            R_ref[f_idx, p_idx] = res.R_background[0]
 
     return R_total, R_ref
 

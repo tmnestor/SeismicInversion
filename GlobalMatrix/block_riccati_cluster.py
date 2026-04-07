@@ -1762,12 +1762,67 @@ def block_gmres_freq(
 # ---------------------------------------------------------------------------
 
 
+def _build_incident_field_coupled_kpar(
+    centres: NDArray[np.floating],
+    k_par: NDArray[np.complexfloating],
+) -> NDArray[np.complexfloating]:
+    """``(9N, 9)`` incident-field matrix dressed by an explicit ``k_par`` 3-vector.
+
+    Mirrors :func:`cubic_scattering._build_incident_field_coupled` but
+    takes the wave-vector explicitly rather than deriving it from
+    ``(k_hat, wave_type, ω, ref)``.  The lattice phase factor at cube
+    ``m`` is ``exp(i k_par · x_m)`` — *not* ``exp(i |k| k_hat · x_m)``
+    — so ``k_par`` may be complex (post-critical evanescent kz) and
+    its magnitude is *not* assumed to lie on the dispersion relation
+    of any particular wave type.  This decouples the phase dressing
+    from the unit-vector ``k_hat`` parameterisation, which is exactly
+    what is needed when the same slab is probed at many lateral
+    wavenumbers ``(kx, ky)`` but the inner basis is in a fixed local
+    9×9 frame.
+
+    Args:
+        centres: Sub-cell centre coordinates, shape ``(N, 3)``, real.
+        k_par: Wave-vector ``(kx, ky, kz)``, shape ``(3,)``, real or
+            complex.  ``kz`` may be imaginary for post-critical S/P
+            slownesses; only its scalar contribution to the lattice
+            dressing matters when all cubes lie at the same z.
+
+    Returns:
+        Incident-field matrix, shape ``(9N, 9)``, complex.
+    """
+    N = centres.shape[0]
+    k_par_arr = np.asarray(k_par, dtype=complex).reshape(3)
+    # Lattice phases: complex per-cube scalar.
+    phases = np.exp(1j * (centres @ k_par_arr))  # (N,) complex
+    x_centre = np.mean(centres, axis=0)
+
+    U0 = np.zeros((9 * N, 9), dtype=complex)
+    for m in range(N):
+        phase = phases[m]
+        # Columns 0-2: uniform displacement, zero strain.
+        U0[9 * m : 9 * m + 3, :3] = np.eye(3) * phase
+
+        # Columns 3-8: linear-displacement + uniform Voigt strain.
+        dx = centres[m] - x_centre
+        for alpha, (p, q) in enumerate(VOIGT_PAIRS):
+            eps_tensor = np.zeros((3, 3))
+            if p == q:
+                eps_tensor[p, p] = 1.0
+            else:
+                eps_tensor[p, q] = 0.5
+                eps_tensor[q, p] = 0.5
+            U0[9 * m : 9 * m + 3, 3 + alpha] = (eps_tensor @ dx) * phase
+            U0[9 * m + 3 + alpha, 3 + alpha] = phase
+    return U0
+
+
 def _build_incident_field_coupled_freq(
     centres: NDArray[np.floating],
     omegas: NDArray[np.complexfloating],
     ref: ReferenceMedium,
     k_hat: NDArray | None = None,
     wave_type: str = "S",
+    k_par_freq: NDArray[np.complexfloating] | None = None,
 ) -> NDArray[np.complexfloating]:
     """Frequency-batched coupled incident field ``ψ_inc``.
 
@@ -1776,18 +1831,44 @@ def _build_incident_field_coupled_freq(
     but the batch API lets the block FL solver feed ``(F, 9·N, 9)`` RHS
     straight into :func:`block_gmres_freq`.
 
+    When ``k_par_freq`` is provided (shape ``(F, 3)``, complex), the
+    lattice phase dressing at frequency ``f`` is ``exp(i k_par_freq[f] · x_m)``
+    — bypassing the ``(k_hat, wave_type, ω, ref)`` derivation entirely.
+    This is the path used by the per-slowness inner solver: at each
+    frequency the caller supplies its own ``(kx, ky, kz)``, including
+    complex ``kz`` for post-critical evanescent modes.
+
     Args:
         centres: Sub-cell centres, shape (N, 3).
         omegas: Complex angular frequencies, shape (F,).
         ref: Background medium.
         k_hat: Incident unit direction (default z-hat upstream).
         wave_type: 'S' or 'P'.
+        k_par_freq: Optional per-frequency wave-vector stack of shape
+            ``(F, 3)``.  When provided, overrides the
+            ``(k_hat, wave_type)`` phase derivation.
 
     Returns:
         Incident field stack, shape ``(F, 9·N, 9)``.
     """
     _validate_omegas(omegas)
     n_freq = omegas.shape[0]
+    if k_par_freq is not None:
+        k_par_freq_arr = np.asarray(k_par_freq, dtype=complex)
+        if k_par_freq_arr.shape != (n_freq, 3):
+            msg = (
+                f"k_par_freq has shape {k_par_freq_arr.shape}, expected ({n_freq}, 3)."
+            )
+            raise ValueError(msg)
+        psi0 = _build_incident_field_coupled_kpar(centres, k_par_freq_arr[0])
+        out = np.empty((n_freq,) + psi0.shape, dtype=complex)
+        out[0] = psi0
+        for f_idx in range(1, n_freq):
+            out[f_idx] = _build_incident_field_coupled_kpar(
+                centres, k_par_freq_arr[f_idx]
+            )
+        return out
+
     # Probe shape once via the first frequency to allocate the output.
     psi0 = _build_incident_field_coupled(
         centres, omegas[0], ref, k_hat=k_hat, wave_type=wave_type
@@ -2146,6 +2227,8 @@ def solve_slab_foldy_lax_freq_het(
     contrasts_per_cube: list[MaterialContrast],
     k_hat: NDArray | None = None,
     wave_type: str = "S",
+    k_par_freq: NDArray[np.complexfloating] | None = None,
+    k_par_out_freq: NDArray[np.complexfloating] | None = None,
     rtol: float = 1e-8,
     max_iter: int = _BLOCK_GMRES_FREQ_DEFAULT_MAXITER,
 ) -> tuple[
@@ -2168,9 +2251,29 @@ def solve_slab_foldy_lax_freq_het(
     depends only on the translation-invariant background Green's
     function.  This decouples the FFT acceleration from T-uniformity.
 
-    The composite T-matrix is accumulated per frequency via
-    ``T_comp = Σ_n T_n @ ψ_exc[n]`` — the direct generalisation of the
-    uniform-contrast accumulator ``Σ_n T_loc @ ψ_exc[n]``.
+    The composite T-matrix is accumulated per frequency in one of two
+    ways:
+
+    * **Single composite (legacy)**: when ``k_par_out_freq is None``,
+      ``T_comp_freq[f] = Σ_n T_n @ ψ_exc[f, n]`` is the unprojected sum
+      of all per-cube scattered moments.  Output shape ``(F, 9, 9)``.
+      This is the existing behaviour and is what the canary tests
+      against the uniform-contrast path verify.
+
+    * **Plane-wave projection**: when ``k_par_out_freq`` is provided
+      (shape ``(F, n_p_out, 3)``, complex), the per-cube moments are
+      projected onto outgoing plane waves at each ``p_out``:
+
+      .. math::
+          T_{\\mathrm{comp}}[f, p_{out}] =
+              \\sum_n e^{-i\\,\\mathbf{k}_{\\mathrm{out}}(f, p_{out})\\cdot\\mathbf{x}_n}
+              \\,(T_n\\,\\psi_{\\mathrm{exc}}[f, n]).
+
+      Output shape ``(F, n_p_out, 9, 9)``.  This is the projection step
+      that turns one inner solve at incident slowness ``p_in`` (set via
+      ``k_par_freq``) into a full *row* of the slowness-coupling matrix
+      ``T(p_out, p_in)`` for use by the multi-slowness Riccati outer
+      sweep.
 
     Args:
         M: Lateral grid size.
@@ -2180,14 +2283,32 @@ def solve_slab_foldy_lax_freq_het(
         ref: Background medium.
         contrasts_per_cube: Length-``M·M·N_z`` list of per-cube
             :class:`MaterialContrast` in :func:`cluster_from_slab` order.
-        k_hat: Incident unit direction (default z-hat).
-        wave_type: 'S' or 'P'.
+        k_hat: Incident unit direction (default z-hat).  Ignored when
+            ``k_par_freq`` is provided.
+        wave_type: 'S' or 'P'.  Ignored when ``k_par_freq`` is provided.
+        k_par_freq: Optional per-frequency wave-vector stack of shape
+            ``(F, 3)``, complex.  When provided, the lattice phase
+            dressing of the 9 incident-basis columns at frequency
+            ``f`` is ``exp(i k_par_freq[f] · x_m)`` instead of the
+            ``(k_hat, wave_type)`` derivation.  This is the path used
+            by per-slowness inner solves: the caller passes
+            ``(kx, ky, kz)`` directly, with ``kz`` allowed to be
+            complex for post-critical (evanescent) modes.  When
+            ``None``, falls through to the existing behaviour and the
+            canary tests are unaffected.
+        k_par_out_freq: Optional per-frequency outgoing-slowness stack
+            of shape ``(F, n_p_out, 3)``, complex.  When provided, the
+            composite T-matrix is projected onto each outgoing plane
+            wave; the return shape becomes ``(F, n_p_out, 9, 9)``.
+            When ``None``, the legacy single-composite ``(F, 9, 9)``
+            output is returned.
         rtol: Relative residual tolerance for block_gmres_freq.
         max_iter: Max block Arnoldi iterations.
 
     Returns:
-        ``(T_comp_freq, iters, rel_res_freq)`` with
-        ``T_comp_freq`` of shape ``(F, 9, 9)`` and ``rel_res_freq`` of
+        ``(T_comp_freq, iters, rel_res_freq)`` with ``T_comp_freq``
+        of shape ``(F, 9, 9)`` (legacy) or ``(F, n_p_out, 9, 9)``
+        (when ``k_par_out_freq`` is provided), and ``rel_res_freq`` of
         shape ``(F,)``.
     """
     _validate_omegas(omegas)
@@ -2234,7 +2355,12 @@ def solve_slab_foldy_lax_freq_het(
 
     # Incident field in original ordering, then z-sort.
     psi_inc_freq = _build_incident_field_coupled_freq(
-        geom.centres, omegas, ref, k_hat=k_hat, wave_type=wave_type
+        geom.centres,
+        omegas,
+        ref,
+        k_hat=k_hat,
+        wave_type=wave_type,
+        k_par_freq=k_par_freq,
     )  # (F, 9*N, 9)
     psi_inc_sorted = np.empty_like(psi_inc_freq)
     for f_idx in range(n_freq):
@@ -2261,16 +2387,211 @@ def solve_slab_foldy_lax_freq_het(
         max_iter=max_iter,
     )
 
-    # Composite T-matrix: Σ_n T_n @ ψ_exc[n].  Both the T stack and the
-    # solution are in z-sorted order, so accumulate directly on the
-    # sorted representation.
-    T_comp_freq = np.zeros((n_freq, 9, 9), dtype=complex)
-    # X_sorted has shape (F, 9·nC, 9).  Reshape to (F, nC, 9, 9), then
-    # contract with T_sorted (F, nC, 9, 9) by einsum over the cube axis.
+    # Composite T-matrix.  Both the T stack and the solution are in
+    # z-sorted order, so accumulate directly on the sorted
+    # representation.  X_sorted has shape (F, 9·nC, 9); reshape to
+    # (F, nC, 9, 9) so we can contract with T_sorted (F, nC, 9, 9)
+    # along the per-cube 9-axis.
     psi_exc_sorted_blocks = X_sorted.reshape(n_freq, nC, 9, 9)
-    T_comp_freq = np.einsum("fnij,fnjk->fik", T_sorted, psi_exc_sorted_blocks)
+    # Per-cube scattered moments T_n @ ψ_exc[n], shape (F, nC, 9, 9).
+    TPsi = np.einsum("fnij,fnjk->fnik", T_sorted, psi_exc_sorted_blocks)
+
+    if k_par_out_freq is None:
+        # Legacy single composite: unprojected sum of moments.
+        T_comp_freq = TPsi.sum(axis=1)  # (F, 9, 9)
+    else:
+        # Plane-wave projection: weight each cube's moment by
+        # exp(-i k_par_out · x_n) and sum over cubes for every output
+        # slowness.  centres_sorted has shape (nC, 3) in the same order
+        # as the per-cube T stack and ψ_exc.
+        k_par_out_arr = np.asarray(k_par_out_freq, dtype=complex)
+        if k_par_out_arr.ndim != 3 or k_par_out_arr.shape[0] != n_freq:
+            msg = (
+                f"k_par_out_freq has shape {k_par_out_arr.shape}, "
+                f"expected ({n_freq}, n_p_out, 3)."
+            )
+            raise ValueError(msg)
+        if k_par_out_arr.shape[2] != 3:
+            msg = (
+                f"k_par_out_freq has shape {k_par_out_arr.shape}, "
+                "third axis must be size 3 (kx, ky, kz)."
+            )
+            raise ValueError(msg)
+        centres_sorted = geom.centres[decomp.sort_order]  # (nC, 3)
+        # phase[f, p_out, n] = exp(-i k_par_out_freq[f, p_out] · x_n)
+        phase = np.exp(-1j * np.einsum("fpd,nd->fpn", k_par_out_arr, centres_sorted))
+        T_comp_freq = np.einsum("fpn,fnik->fpik", phase, TPsi)
 
     return T_comp_freq, iters, rel_res_freq
+
+
+def solve_slab_foldy_lax_single_freq_het_taup(
+    M: int,
+    N_z: int,
+    a: float,
+    omega: complex,
+    ref: ReferenceMedium,
+    contrasts_per_cube: list[MaterialContrast],
+    k_par_in: NDArray[np.complexfloating],
+    k_par_out: NDArray[np.complexfloating],
+    rtol: float = 1e-8,
+    max_iter: int = _BLOCK_GMRES_FREQ_DEFAULT_MAXITER,
+) -> tuple[
+    NDArray[np.complexfloating],
+    int,
+    float,
+]:
+    """Single-ω **slowness-batched** heterogeneous Foldy–Lax solve.
+
+    At a fixed frequency the Helmholtz operator is fixed: the propagator
+    FFT kernel and the dressed per-cube T-matrices do not depend on the
+    incident slowness.  All ``n_p_in`` incident plane waves therefore
+    become extra right-hand-side columns of one block-GMRES solve, with
+    each slowness contributing 9 columns (one per fundamental
+    incident-mode in the local 9×9 basis).
+
+    The block-GMRES RHS is built by stacking
+    ``_build_incident_field_coupled_kpar(centres, k_par_in[k])`` for
+    ``k = 0..n_p_in-1`` along the ``k_rhs`` axis, giving a total of
+    ``9 * n_p_in`` columns.  After the solve the per-cube scattered
+    moments are projected onto the outgoing plane waves at every
+    ``k_par_out[p_out]`` to assemble the full slowness-coupling matrix
+    ``T(p_out, p_in, 9, 9)`` for the layer.
+
+    This is the algorithmic core of the τ-p pipeline: at each
+    ``(layer, ω)`` one call to this function produces the entire
+    coupling row needed by the multi-slowness Riccati outer sweep.
+
+    Args:
+        M: Lateral grid size.
+        N_z: Number of z-layers (cubic stack thickness in cubes).
+        a: Cube half-width (m).
+        omega: Single complex angular frequency.  Imaginary part is the
+            damping ``ω = ω_real + i·η``.
+        ref: Background medium.
+        contrasts_per_cube: Length-``M·M·N_z`` list of per-cube
+            :class:`MaterialContrast` in :func:`cluster_from_slab` order.
+        k_par_in: Incident wave-vectors, shape ``(n_p_in, 3)``, complex.
+            Each row is ``(kx, ky, kz)`` for one incident slowness;
+            ``kz`` may be complex for post-critical evanescent modes.
+        k_par_out: Outgoing wave-vectors, shape ``(n_p_out, 3)``, complex.
+        rtol: Relative residual tolerance for ``block_gmres_freq``.
+        max_iter: Max block Arnoldi iterations.
+
+    Returns:
+        ``(T_comp, iters, rel_res)`` where ``T_comp`` has shape
+        ``(n_p_out, n_p_in, 9, 9)`` complex, ``iters`` is the number
+        of block Arnoldi steps, and ``rel_res`` is the maximum
+        per-frequency relative residual at the converged step.
+    """
+    if not np.iscomplexobj(np.asarray(omega)):
+        omega_c = complex(omega)
+    else:
+        omega_c = complex(omega)
+    n_expected = M * M * N_z
+    if len(contrasts_per_cube) != n_expected:
+        msg = (
+            f"contrasts_per_cube has length {len(contrasts_per_cube)}, "
+            f"expected M·M·N_z = {M}·{M}·{N_z} = {n_expected}. "
+            "Provide one MaterialContrast per cube in cluster_from_slab "
+            "canonical order (iz outer, ix middle, iy inner)."
+        )
+        raise ValueError(msg)
+
+    k_par_in_arr = np.asarray(k_par_in, dtype=complex)
+    if k_par_in_arr.ndim != 2 or k_par_in_arr.shape[1] != 3:
+        msg = f"k_par_in has shape {k_par_in_arr.shape}, expected (n_p_in, 3)."
+        raise ValueError(msg)
+    k_par_out_arr = np.asarray(k_par_out, dtype=complex)
+    if k_par_out_arr.ndim != 2 or k_par_out_arr.shape[1] != 3:
+        msg = f"k_par_out has shape {k_par_out_arr.shape}, expected (n_p_out, 3)."
+        raise ValueError(msg)
+
+    n_p_in = k_par_in_arr.shape[0]
+    n_p_out = k_par_out_arr.shape[0]
+
+    geom = cluster_from_slab(M, N_z, a)
+    decomp = decompose_layers(geom)
+    nC = len(geom.centres)
+    omegas = np.array([omega_c], dtype=complex)
+    n_freq = 1
+
+    # Per-cube T at this single frequency, shape (1, nC, 9, 9).
+    T_per_cube_freq = build_T_loc_per_cube_freq(a, ref, contrasts_per_cube, omegas)
+
+    # Z-sort and split per layer.
+    T_sorted = T_per_cube_freq[:, decomp.sort_order, :, :]
+    T_per_cube_by_layer: list[NDArray[np.complexfloating]] = []
+    for lz in range(decomp.n_layers):
+        s = decomp.layer_slices[lz]
+        T_per_cube_by_layer.append(T_sorted[:, s, :, :])
+
+    # Propagator-only FFT kernels at this single frequency.
+    shared_intralayer_freq = build_propagator_fft_kernel_freq(
+        M, a, omegas, ref, dz_cubes=0
+    )
+    intralayer_freq = [shared_intralayer_freq] * decomp.n_layers
+    max_dz = (
+        int(decomp.z_indices[-1] - decomp.z_indices[0]) if decomp.n_layers > 1 else 0
+    )
+    interlayer_freq = build_interlayer_propagator_kernel_cache_freq(
+        M, a, omegas, ref, max_dz
+    )
+
+    # Stack the n_p_in incident fields as 9*n_p_in RHS columns.  Column
+    # ordering is contiguous per slowness: cols [9k .. 9k+9) belong to
+    # k_par_in[k], in the natural 9-mode basis.
+    k_rhs = 9 * n_p_in
+    psi_inc_block = np.empty((9 * nC, k_rhs), dtype=complex)
+    for k in range(n_p_in):
+        psi_inc_block[:, 9 * k : 9 * (k + 1)] = _build_incident_field_coupled_kpar(
+            geom.centres, k_par_in_arr[k]
+        )
+
+    # Z-sort the RHS in-place per column, then wrap as a single
+    # frequency batch (1, 9*nC, k_rhs).
+    psi_inc_sorted = np.empty_like(psi_inc_block)
+    for col in range(k_rhs):
+        psi_inc_sorted[:, col] = _reorder_flat(
+            psi_inc_block[:, col], decomp.sort_order, nC
+        )
+    psi_inc_freq = psi_inc_sorted[None, :, :]  # (1, 9*nC, k_rhs)
+
+    def matvec_multi_freq(W: NDArray) -> NDArray:
+        return layered_matvec_multi_het_freq(
+            W,
+            decomp,
+            T_per_cube_by_layer,
+            intralayer_freq,
+            interlayer_freq,
+            M,
+        )
+
+    X_sorted, iters, rel_res_freq = block_gmres_freq(
+        matvec_multi_freq,
+        psi_inc_freq,
+        x0=psi_inc_freq.copy(),
+        rtol=rtol,
+        max_iter=max_iter,
+    )
+
+    # X_sorted has shape (1, 9*nC, 9*n_p_in).  Reshape into per-cube
+    # 9-mode-out × n_p_in × 9-mode-in blocks then contract with the
+    # per-cube T (also (nC, 9, 9)).
+    psi_exc_blocks = X_sorted[0].reshape(nC, 9, n_p_in, 9)
+    T_sorted_single = T_sorted[0]  # (nC, 9, 9)
+
+    # TPsi[n, i, p_in, k] = Σ_j T_sorted[n, i, j] * psi_exc[n, j, p_in, k]
+    TPsi = np.einsum("nij,njpk->nipk", T_sorted_single, psi_exc_blocks)
+
+    centres_sorted = geom.centres[decomp.sort_order]  # (nC, 3)
+    # phase[p_out, n] = exp(-i k_par_out[p_out] · x_n)
+    phase = np.exp(-1j * np.einsum("pd,nd->pn", k_par_out_arr, centres_sorted))
+
+    # T_comp[p_out, p_in, i, k] = Σ_n phase[p_out, n] * TPsi[n, i, p_in, k]
+    T_comp = np.einsum("pn,niqk->pqik", phase, TPsi)
+
+    return T_comp, iters, float(np.max(rel_res_freq))
 
 
 # ---------------------------------------------------------------------------

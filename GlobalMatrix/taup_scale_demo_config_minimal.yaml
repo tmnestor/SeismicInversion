@@ -1,0 +1,80 @@
+# Minimal 4-layer config reproducing the validation run of
+# `taup_scale_demo.ipynb` (two heterogeneous elastic layers: pillow
+# basalt + gabbro).  Compared to `taup_scale_demo_config.yaml` this
+# file:
+#
+#   - Strips the model down to 4 layers (water + pillow_2 + gabbro_5 +
+#     mantle half-space), so the inner block Foldy-Lax solver runs on
+#     only 2 elastic ifaces instead of 18.
+#   - Tames the GMM fractional contrast defaults to ±20%/15%/5% on
+#     (Δλ/λ, Δμ/μ, Δρ/ρ) so the scatterer Lamé parameters stay
+#     strictly positive and |R_total| ≤ 1.
+#   - Drops `nw` from 256 → 64 so the end-to-end run finishes in
+#     ~25 min on an M-series Mac with `n_workers=8`.
+#
+# Units: km/s, g/cm³, km, rad/s.
+#
+# To use: in `taup_scale_demo.ipynb`, cell `imports`, set
+#
+#     CONFIG_PATH = Path("taup_scale_demo_config_minimal.yaml")
+#
+# and re-execute.  The notebook's override block in `load-config` is
+# idempotent against this file (the layer slice is a no-op because
+# pillow_2/gabbro_5/mantle are the only elastic/half-space layers
+# present, and the GMM defaults here already match the override).
+
+random_seed: 20260406
+
+model:
+  layers:
+    - {name: water,    alpha: 1.50, beta: 0.00, rho: 1.03, thickness: 4.500,
+       Q_alpha: 20000, Q_beta: 1.0e10}
+    - {name: pillow_2, alpha: 4.00, beta: 2.20, rho: 2.60, thickness: 0.500,
+       Q_alpha: 250,   Q_beta: 125}
+    - {name: gabbro_5, alpha: 6.90, beta: 3.80, rho: 2.97, thickness: 0.400,
+       Q_alpha: 400,   Q_beta: 200}
+    - {name: mantle,   alpha: 8.10, beta: 4.50, rho: 3.30, thickness: .inf,
+       Q_alpha: 500,   Q_beta: 250}
+
+voxels:
+  M: 64           # 64 × 64 = 4096voxels per layer
+  N_z: 1          # one z-slice of cubes per layer
+  a_km: 0.010     # cube half-width (km) → 10 m, space-filling
+
+  defaults:
+    p_soft: 0.3
+    hard:
+      Dlambda: {mean:  0.20, std: 0.05}
+      Dmu:     {mean:  0.15, std: 0.05}
+      Drho:    {mean:  0.05, std: 0.01}
+    soft:
+      Dlambda: {mean: -0.20, std: 0.05}
+      Dmu:     {mean: -0.15, std: 0.05}
+      Drho:    {mean: -0.05, std: 0.01}
+
+  overrides: {}   # no per-iface overrides; both elastic layers use defaults
+
+frequency:
+  nw: 64                    # positive frequencies (excluding DC)
+  T_record: 32.0            # record length (s)  → dω = 2π/T ≈ 0.196 rad/s
+  damping: 0.1              # imag part of ω (rad/s)
+
+slowness:
+  # Note: the notebook builds its own 2D tensor-product fan
+  # (`n_p_x × n_p_y`) from `p_min, p_max` directly, so the `n_p`
+  # field here is only consumed as a sanity field by the loader.
+  p_min: 0.05               # s/km
+  p_max: 0.60               # s/km
+  n_p:   48
+
+block_gmres:
+  rtol: 1.0e-8
+  max_iter: 30
+
+output:
+  dir: GlobalMatrix/output/taup_scale_demo
+  npz_name: taup_scale_demo.npz
+  figures:
+    wiggle_total:     taup_wiggle_gather.pdf
+    wiggle_reference: taup_reference_wiggle_gather.pdf
+    r_omega_p:        r_omega_p_heatmap.pdf
